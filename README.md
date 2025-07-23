@@ -43,9 +43,9 @@ SecKC-MHN-Globe [OPTIONS]
 
 ### Command Line Options
 
- `-h`  Show help message 
- `-d <filename>`  Enable debug logging to specified file 
- `-s <seconds>`  Globe rotation period in seconds (10-300, default: 30) 
+ `-h`  Show help message   
+ `-d <filename>`  Enable debug logging to specified file   
+ `-s <seconds>`  Globe rotation period in seconds (10-300, default: 30)   
 
 ### Controls
 
