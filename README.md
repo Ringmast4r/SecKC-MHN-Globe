@@ -28,7 +28,7 @@ Terminal-based application displaying a rotating 3D ASCII globe with a live dash
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/SecKC-MHN-Globe.git
+git clone https://github.com/n0xa/SecKC-MHN-Globe.git
 cd SecKC-MHN-Globe
 
 # Build the application
