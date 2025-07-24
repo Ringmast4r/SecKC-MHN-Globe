@@ -5,7 +5,7 @@ Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash), I want
 ## TUI Earth Visualization with Honeypot Monitoring
 ![SecKC-MHN-Globe Animation](animation.gif)
 
-Terminal-based application displaying a rotating 3D ASCII globe with a live dashboard of incoming connection attempts. Connects to HPFeeds (honeypot data feeds) to show real-time attack data from security honeypots worldwide.
+Terminal-based application displaying a rotating 3D ASCII globe with a live dashboard of incoming connection attempts. Connects to HPFeeds (honeypot data feeds) to show real-time attack data from security honeypots worldwide. The upper right of the display has indicators for the HPFeeds and GeoIP status. + if they are configured and working properly, ! if they are not.
 
 ![Terminal Interface](https://img.shields.io/badge/Interface-Terminal%20TUI-green)
 ![Go Version](https://img.shields.io/badge/Go-1.24.5-blue)
