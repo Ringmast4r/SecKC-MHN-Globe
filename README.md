@@ -5,7 +5,7 @@ Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash), I want
 ## TUI Earth Visualization with Honeypot Monitoring
 ![SecKC-MHN-Globe Animation](animation.gif)
 
-Terminal-based application displaying a rotating 3D ASCII globe with a live dashboard of incoming connection attempts. Connects to HPFeeds (honeypot data feeds) to show real-time attack data from security honeypots worldwide. The upper right of the display has indicators for the HPFeeds and GeoIP status. + if they are configured and working properly, ! if they are not.
+Terminal-based application displaying a rotating 3D ASCII globe with a live dashboard of incoming connection attempts. Connects to HPFeeds (honeypot data feeds) to show real-time attack data from security honeypots worldwide. 
 
 ![Terminal Interface](https://img.shields.io/badge/Interface-Terminal%20TUI-green)
 ![Go Version](https://img.shields.io/badge/Go-1.24.5-blue)
@@ -13,13 +13,16 @@ Terminal-based application displaying a rotating 3D ASCII globe with a live dash
 
 ## Features
 
-- **3D ASCII Globe**: Real-time rotating Earth visualization in your terminal
-- **Live Attack Visualization**: Red asterisks mark attack source locations on the globe
+- **3D ASCII Globe**: Rotating Earth visualization in your terminal
+- **Live Attack Visualization**: Red asterisks mark (approximate) attack source locations on the globe
 - **HPFeeds Integration**: Connect to honeypot data feeds for real-time threat intelligence
+- **IP/Username/Password**: If a login is detected from an IP, the username and password is displayed
+- **SSH/Telnet Probes**: Connection attempts without login are displayed as connection:[ssh|telnet]
 - **Geographic Mapping**: IP geolocation with MaxMind GeoLite2 database
 - **Mock Data Fallback**: Generates simulated data when HPFeeds is unavailable
 - **Responsive Design**: Adapts to terminal size with optimized layout
 - **Debug Logging**: Comprehensive logging for troubleshooting and analysis
+- **Status Indicators**: + or ! indicates whether HPFeeds and GeoIP are properly configured and working
 
 ## Build
 
