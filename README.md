@@ -25,6 +25,7 @@ Terminal-based application displaying a rotating 3D ASCII globe with a live dash
 - **Status Indicators**: + or ! indicates whether HPFeeds and GeoIP are properly configured and working
 - **Configurable Refresh Rate**: Faster refresh for smoother animation, slower for low bandwidth (serial terminals, etc)  
 - **Monochrome Mode**: For terminals that have reduced color support  
+- **Hourly Attack Stats**: An ASCII bar chart shows SecKC MHN attack volume for the past 24 hours
 ## Build
 
 ```bash
@@ -81,7 +82,7 @@ Create `hpfeeds.conf` in the application directory:
 ```
 
 **Example:**
-This program was made to interface with the Public SecKC Community HPFeeds stream that I maintain, which you are welcome to try:
+This program was made to interface with the Public SecKC Community HPFeeds stream that I maintain, which this project will try to use by default if no configuration file is provided:
 ```
 seckc-community fk6QgrnyvwbWSxCIwL5SIc2oARC4DXx46 mhn.h-i-r.net 10000 cowrie.sessions
 ```

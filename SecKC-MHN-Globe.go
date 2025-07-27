@@ -1699,7 +1699,7 @@ func main() {
 	quit := tui.pollEvents()
 
 	// Create a shared dashboard instance for both TUI and HPFeeds
-	sharedDashboard := NewDashboard(tui.height - 3) // Reserve space for stats
+	sharedDashboard := NewDashboard(tui.height - 4) // Reserve space for stats header and chart
 	tui.dashboard = sharedDashboard
 	debugLog("Created shared dashboard at pointer: %p", sharedDashboard)
 
@@ -1707,18 +1707,27 @@ func main() {
 	config, err := readHPFeedsConfig("hpfeeds.conf")
 	useLiveData := false
 	if err != nil {
-		debugLog("HPFeeds config error: %v", err)
-	} else {
-		debugLog("HPFeeds config loaded: server=%s:%s channel=%s", config.Server, config.Port, config.Channel)
-		debugLog("Dashboard pointer for HPFeeds: %p", sharedDashboard)
-		err = startHPFeedsClient(config, sharedDashboard)
-		if err != nil {
-			debugLog("HPFeeds client connection failed: %v", err)
-		} else {
-			debugLog("HPFeeds client connected successfully")
-			globalHPFeedsConnected = true
-			useLiveData = true
+		debugLog("HPFeeds config file not found: %v", err)
+		debugLog("Using default SecKC MHN public credentials")
+		// Use default SecKC MHN credentials
+		config = &HPFeedsConfig{
+			Ident:   "seckc-community",
+			Secret:  "fk6QgrnyvwbWSxCIwL5SIc2oARC4DXx46",
+			Server:  "mhn.h-i-r.net",
+			Port:    "10000",
+			Channel: "cowrie.sessions",
 		}
+	}
+	
+	debugLog("HPFeeds config: server=%s:%s channel=%s ident=%s", config.Server, config.Port, config.Channel, config.Ident)
+	debugLog("Dashboard pointer for HPFeeds: %p", sharedDashboard)
+	err = startHPFeedsClient(config, sharedDashboard)
+	if err != nil {
+		debugLog("HPFeeds client connection failed: %v", err)
+	} else {
+		debugLog("HPFeeds client connected successfully")
+		globalHPFeedsConnected = true
+		useLiveData = true
 	}
 
 	startTime := time.Now()
