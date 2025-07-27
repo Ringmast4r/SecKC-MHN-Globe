@@ -23,8 +23,8 @@ Terminal-based application displaying a rotating 3D ASCII globe with a live dash
 - **Responsive Design**: Adapts to terminal size with optimized layout
 - **Debug Logging**: Comprehensive logging for troubleshooting and analysis
 - **Status Indicators**: + or ! indicates whether HPFeeds and GeoIP are properly configured and working
-- **Configurable Refresh Rate**: Faster refresh for smoother animation, slower for low bandwidth (serial terminals, etc)
-
+- **Configurable Refresh Rate**: Faster refresh for smoother animation, slower for low bandwidth (serial terminals, etc)  
+- **Monochrome Mode**: For terminals that have reduced color support  
 ## Build
 
 ```bash
@@ -50,7 +50,8 @@ SecKC-MHN-Globe [OPTIONS]
  `-h`  Show help message   
  `-d <filename>`  Enable debug logging to specified file   
  `-s <seconds>`  Globe rotation period in seconds (10-300, default: 30)   
- `-r <milliseconds>` Globe refresh rate in ms (50-1000, default: 100)
+ `-r <milliseconds>` Globe refresh rate in ms (50-1000, default: 100)  
+ `-m`  Monochrome mode without fancy colors  
 
 ### Controls
 

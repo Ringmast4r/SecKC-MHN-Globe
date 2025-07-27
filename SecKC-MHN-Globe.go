@@ -97,6 +97,45 @@ type Dashboard struct {
 
 var debugLogger *log.Logger
 
+// Global color variables for theming
+var (
+	colorBackground    tcell.Color
+	colorText          tcell.Color
+	colorGlobe         tcell.Color
+	colorAttack        tcell.Color
+	colorDashboard     tcell.Color
+	colorStats         tcell.Color
+	colorSeparator     tcell.Color
+	colorStatusOk      tcell.Color
+	colorStatusError   tcell.Color
+)
+
+// initializeColors sets up the global color variables based on monochrome mode
+func initializeColors(monochrome bool) {
+	// Background is always black
+	colorBackground = tcell.ColorBlack
+	
+	if monochrome {
+		colorText = tcell.ColorWhite
+		colorGlobe = tcell.ColorWhite
+		colorAttack = tcell.ColorWhite
+		colorDashboard = tcell.ColorWhite
+		colorStats = tcell.ColorWhite
+		colorSeparator = tcell.ColorWhite
+		colorStatusOk = tcell.ColorWhite
+		colorStatusError = tcell.ColorWhite
+	} else {
+		colorText = tcell.ColorWhite
+		colorGlobe = tcell.ColorGreen
+		colorAttack = tcell.ColorRed
+		colorDashboard = tcell.ColorYellow
+		colorStats = tcell.ColorAqua
+		colorSeparator = tcell.ColorGray
+		colorStatusOk = tcell.ColorGreen
+		colorStatusError = tcell.ColorRed
+	}
+}
+
 type GeoIPManager struct {
 	db    *geoip2.Reader
 	mutex sync.RWMutex
@@ -734,7 +773,7 @@ func NewTUI() (*TUI, error) {
 		return nil, err
 	}
 
-	screen.SetStyle(tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite))
+	screen.SetStyle(tcell.StyleDefault.Background(colorBackground).Foreground(colorText))
 	screen.Clear()
 
 	width, height := screen.Size()
@@ -760,8 +799,8 @@ func NewTUI() (*TUI, error) {
 	}
 
 	tui.globe = NewGlobe(globeWidth, height)
-	// Reserve 3 lines for stats at bottom
-	tui.dashboard = NewDashboard(height - 3)
+	// Reserve 4 lines for stats header and chart at bottom
+	tui.dashboard = NewDashboard(height - 4)
 	tui.stats = NewStatsManager()
 
 	debugLog("TUI: Initialized with size %dx%d (globe: %d, dashboard: 45)", width, height, globeWidth)
@@ -793,10 +832,10 @@ func (tui *TUI) HandleResize() {
 	tui.globe = NewGlobe(globeWidth, tui.height)
 
 	// Update dashboard MaxLines without creating a new instance (preserve shared reference)
-	// Reserve 3 lines for stats at bottom
+	// Reserve 4 lines for stats header and chart at bottom
 	if tui.dashboard != nil {
 		tui.dashboard.mutex.Lock()
-		newMaxLines := tui.height - 3
+		newMaxLines := tui.height - 4
 		tui.dashboard.MaxLines = newMaxLines
 		// Trim connections if necessary
 		if len(tui.dashboard.Connections) > newMaxLines {
@@ -850,8 +889,8 @@ func (tui *TUI) renderGlobe(rotation float64) {
 	}
 
 	globeScreen := tui.globe.render(rotation)
-	landStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen)
-	attackStyle := tcell.StyleDefault.Foreground(tcell.ColorRed).Bold(true)
+	landStyle := tcell.StyleDefault.Foreground(colorGlobe)
+	attackStyle := tcell.StyleDefault.Foreground(colorAttack).Bold(true)
 
 	// Clear globe area
 	for y := 0; y < tui.globe.Height; y++ {
@@ -889,8 +928,8 @@ func (tui *TUI) renderDashboard() {
 		return
 	}
 
-	// Calculate dashboard height (reserve 3 lines for stats at bottom)
-	dashboardHeight := tui.height - 3
+	// Calculate dashboard height (reserve 4 lines for stats header and chart at bottom)
+	dashboardHeight := tui.height - 4
 	dashLines := tui.dashboard.Render(dashboardHeight)
 	separatorX := tui.globe.Width + 1
 	startX := separatorX + 2 // Dashboard starts 2 chars after separator
@@ -909,14 +948,14 @@ func (tui *TUI) renderDashboard() {
 	// Draw separator (full height)
 	for y := 0; y < tui.height; y++ {
 		tui.screen.SetContent(separatorX, y, '|', nil,
-			tcell.StyleDefault.Foreground(tcell.ColorGray))
+			tcell.StyleDefault.Foreground(colorSeparator))
 	}
 
 	// Draw dashboard content
-	headerStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow).Bold(true)
-	connectionStyle := tcell.StyleDefault.Foreground(tcell.ColorAqua)
-	statusOkStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen).Bold(true)
-	statusErrorStyle := tcell.StyleDefault.Foreground(tcell.ColorRed).Bold(true)
+	headerStyle := tcell.StyleDefault.Foreground(colorDashboard).Bold(true)
+	connectionStyle := tcell.StyleDefault.Foreground(colorStats)
+	statusOkStyle := tcell.StyleDefault.Foreground(colorStatusOk).Bold(true)
+	statusErrorStyle := tcell.StyleDefault.Foreground(colorStatusError).Bold(true)
 
 	for y, line := range dashLines {
 		if y >= dashboardHeight {
@@ -966,6 +1005,19 @@ func (tui *TUI) renderDashboard() {
 		}
 	}
 
+	// Draw stats header separator
+	headerY := dashboardHeight
+	if headerY < tui.height {
+		headerText := "-=-=-=-=- [ HOURLY ATTACK STATS ] -=-=-=-=-"
+		headerStyle := tcell.StyleDefault.Foreground(colorDashboard).Bold(true)
+		// Center the header text within the dashboard width
+		if len(headerText) <= dashboardWidth {
+			padding := (dashboardWidth - len(headerText)) / 2
+			headerX := startX + padding
+			tui.drawText(headerX, headerY, headerText, headerStyle)
+		}
+	}
+
 	tui.mutex.Lock()
 	tui.dashChanged = false
 	tui.mutex.Unlock()
@@ -987,7 +1039,7 @@ func (tui *TUI) renderStats() {
 	}
 
 	chartWidth := len(statsLines[0]) // Get actual width including labels
-	startX := tui.width - chartWidth // Position at far right
+	startX := tui.width - chartWidth - 7 // Position 7 characters left from far right
 	if startX < 0 {
 		startX = 0 // Ensure we don't go off screen
 	}
@@ -996,14 +1048,14 @@ func (tui *TUI) renderStats() {
 	statsStartY := tui.height - 3
 
 	// Clear stats area (3 lines)
-	clearStyle := tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorAqua)
+	clearStyle := tcell.StyleDefault.Background(colorBackground).Foreground(colorStats)
 	for y := statsStartY; y < statsStartY+3 && y < tui.height; y++ {
 		for x := startX; x < startX+chartWidth && x < tui.width; x++ {
 			tui.screen.SetContent(x, y, ' ', nil, clearStyle)
 		}
 	}
 
-	textStyle := tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorAqua)
+	textStyle := tcell.StyleDefault.Background(colorBackground).Foreground(colorStats)
 
 	for i, line := range statsLines {
 		y := statsStartY + i
@@ -1530,6 +1582,7 @@ OPTIONS:
     -d <filename>    Enable debug logging to specified file
     -s <seconds>     Globe rotation period in seconds (10-300, default: 30)
     -r <milliseconds> Globe refresh rate in milliseconds (50-1000, default: 100)
+    -m               Enable monochrome mode (all colors set to white)
 
 CONTROLS:
     Q, X, Space, Esc    Exit the application
@@ -1552,6 +1605,7 @@ CONFIGURATION:
 	go-globe -s 10 -d debug.log # Fast rotation with debug logging
 	go-globe -r 200             # Slower 200ms refresh rate
 	go-globe -s 15 -r 50        # Fast rotation with fast 50ms refresh
+	go-globe -m                 # Monochrome mode for terminals with limited colors
 
 	`)
 }
@@ -1561,6 +1615,7 @@ func main() {
 	var showHelpFlag = flag.Bool("h", false, "Show help")
 	var rotationPeriod = flag.Int("s", 30, "Globe rotation period in seconds (10-300)")
 	var refreshRate = flag.Int("r", 100, "Globe refresh rate in milliseconds (50-1000)")
+	var monochrome = flag.Bool("m", false, "Enable monochrome mode (all colors set to white)")
 
 	flag.Parse()
 
@@ -1594,6 +1649,14 @@ func main() {
 
 	debugLog("Rotation period set to %d seconds", *rotationPeriod)
 	debugLog("Globe refresh rate set to %d milliseconds", *refreshRate)
+
+	// Initialize colors based on monochrome flag
+	initializeColors(*monochrome)
+	if *monochrome {
+		debugLog("Monochrome mode enabled")
+	} else {
+		debugLog("Color mode enabled")
+	}
 
 	rand.Seed(time.Now().UnixNano())
 	debugLog("Application starting up")
