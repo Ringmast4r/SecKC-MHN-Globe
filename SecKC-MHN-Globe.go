@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -108,6 +110,23 @@ type LocationInfo struct {
 	Valid     bool
 }
 
+type HourlyStats struct {
+	Date    string         `json:"date"`
+	Hourly  map[string]int `json:"hourly"`
+	Channel string         `json:"channel"`
+}
+
+type StatsResponse []HourlyStats
+
+type StatsManager struct {
+	todayData     StatsResponse
+	yesterdayData StatsResponse
+	lastFetch     time.Time
+	mutex         sync.RWMutex
+	todayURL      string
+	yesterdayURL  string
+}
+
 func NewGeoIPManager() *GeoIPManager {
 	return &GeoIPManager{}
 }
@@ -173,6 +192,276 @@ func (g *GeoIPManager) LookupIP(ipStr string) LocationInfo {
 	return locationInfo
 }
 
+func NewStatsManager() *StatsManager {
+	return &StatsManager{}
+}
+
+func (s *StatsManager) updateURLs() {
+	now := time.Now()
+	today := now.Format("20060102")
+	yesterday := now.AddDate(0, 0, -1).Format("20060102")
+
+	s.todayURL = fmt.Sprintf("https://mhn.h-i-r.net/seckcapi/stats/attacks?date=%s", today)
+	s.yesterdayURL = fmt.Sprintf("https://mhn.h-i-r.net/seckcapi/stats/attacks?date=%s", yesterday)
+}
+
+func (s *StatsManager) fetchFromURL(url, label string) (StatsResponse, error) {
+	debugLog("Stats: Fetching %s data from URL: %s", label, url)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		debugLog("Stats: %s HTTP request failed: %v", label, err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	debugLog("Stats: %s HTTP response status: %d %s", label, resp.StatusCode, resp.Status)
+
+	if resp.StatusCode != http.StatusOK {
+		debugLog("Stats: %s Non-200 status code received: %d", label, resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	// Read the entire response body for logging
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		debugLog("Stats: %s Failed to read response body: %v", label, err)
+		return nil, err
+	}
+
+	debugLog("Stats: %s Complete API response body: %s", label, string(body))
+
+	// Parse the JSON response
+	var stats StatsResponse
+	if err := json.Unmarshal(body, &stats); err != nil {
+		debugLog("Stats: %s JSON parsing failed: %v", label, err)
+		return nil, err
+	}
+
+	debugLog("Stats: %s Fetched data successfully, %d entries", label, len(stats))
+
+	// Log the parsed hourly data points
+	if len(stats) > 0 {
+		debugLog("Stats: %s Date: %s, Channel: %s", label, stats[0].Date, stats[0].Channel)
+		debugLog("Stats: %s Hourly data points:", label)
+		for hour := 0; hour < 24; hour++ {
+			hourStr := fmt.Sprintf("%d", hour)
+			if count, exists := stats[0].Hourly[hourStr]; exists {
+				debugLog("Stats: %s   Hour %02d: %d attacks", label, hour, count)
+			} else {
+				debugLog("Stats: %s   Hour %02d: 0 attacks (no data)", label, hour)
+			}
+		}
+
+		// Calculate and log statistics
+		totalAttacks := 0
+		maxHour := 0
+		maxCount := 0
+		for hourStr, count := range stats[0].Hourly {
+			totalAttacks += count
+			if hour, err := strconv.Atoi(hourStr); err == nil && count > maxCount {
+				maxCount = count
+				maxHour = hour
+			}
+		}
+		debugLog("Stats: %s Total attacks: %d", label, totalAttacks)
+		debugLog("Stats: %s Peak hour: %02d with %d attacks", label, maxHour, maxCount)
+	} else {
+		debugLog("Stats: %s No data entries received", label)
+	}
+
+	return stats, nil
+}
+
+func (s *StatsManager) FetchData() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Update URLs to current/previous date every time we fetch
+	s.updateURLs()
+
+	// Only fetch if more than 5 minutes have passed
+	if time.Since(s.lastFetch) < 5*time.Minute && len(s.todayData) > 0 && len(s.yesterdayData) > 0 {
+		debugLog("Stats: Using cached data (last fetch: %v ago)", time.Since(s.lastFetch))
+		return nil
+	}
+
+	// Fetch today's data
+	todayData, err := s.fetchFromURL(s.todayURL, "Today")
+	if err != nil {
+		debugLog("Stats: Failed to fetch today's data: %v", err)
+		// Don't return error, try yesterday's data anyway
+	} else {
+		s.todayData = todayData
+	}
+
+	// Fetch yesterday's data
+	yesterdayData, err := s.fetchFromURL(s.yesterdayURL, "Yesterday")
+	if err != nil {
+		debugLog("Stats: Failed to fetch yesterday's data: %v", err)
+		// Don't return error, we might have today's data
+	} else {
+		s.yesterdayData = yesterdayData
+	}
+
+	// Update last fetch time if we got at least one dataset
+	if len(s.todayData) > 0 || len(s.yesterdayData) > 0 {
+		s.lastFetch = time.Now()
+		debugLog("Stats: Data fetch completed successfully")
+	} else {
+		debugLog("Stats: Failed to fetch any data")
+		return fmt.Errorf("no data available from either day")
+	}
+
+	return nil
+}
+
+func (s *StatsManager) GetHourlyData() map[string]int {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// Create 24-hour rolling window
+	rollingData := make(map[string]int)
+	currentHour := time.Now().Hour()
+
+	debugLog("Stats: Creating 24-hour rolling window, current hour: %d", currentHour)
+
+	// For each of the past 24 hours, get the appropriate data
+	for i := 0; i < 24; i++ {
+		// Calculate which hour we need (going backwards from current hour)
+		targetHour := (currentHour - i + 24) % 24
+		targetHourStr := fmt.Sprintf("%d", targetHour)
+
+		var count int
+		var found bool
+
+		// If this hour is from today (i.e., i <= currentHour), use today's data
+		if i <= currentHour && len(s.todayData) > 0 {
+			count, found = s.todayData[0].Hourly[targetHourStr]
+			if found {
+				debugLog("Stats: Rolling hour %d (actual hour %02d): %d attacks (from today)", 23-i, targetHour, count)
+			} else {
+				debugLog("Stats: Rolling hour %d (actual hour %02d): 0 attacks (no today data)", 23-i, targetHour)
+			}
+		} else if len(s.yesterdayData) > 0 {
+			// This hour is from yesterday
+			count, found = s.yesterdayData[0].Hourly[targetHourStr]
+			if found {
+				debugLog("Stats: Rolling hour %d (actual hour %02d): %d attacks (from yesterday)", 23-i, targetHour, count)
+			} else {
+				debugLog("Stats: Rolling hour %d (actual hour %02d): 0 attacks (no yesterday data)", 23-i, targetHour)
+			}
+		}
+
+		// Store with the rolling position as key (0 = oldest, 23 = newest/current hour)
+		rollingKey := fmt.Sprintf("%d", 23-i)
+		rollingData[rollingKey] = count
+	}
+
+	debugLog("Stats: 24-hour rolling window created with %d data points", len(rollingData))
+	return rollingData
+}
+
+func (s *StatsManager) RenderBarGraph(width int) []string {
+	hourlyData := s.GetHourlyData()
+	debugLog("BarGraph: Received %d data points", len(hourlyData))
+
+	if len(hourlyData) == 0 {
+		debugLog("BarGraph: No data, returning empty bars")
+		return []string{"", "", ""}
+	}
+
+	// Find max value for scaling
+	maxVal := 0
+	for key, count := range hourlyData {
+		debugLog("BarGraph: Position %s = %d attacks", key, count)
+		if count > maxVal {
+			maxVal = count
+		}
+	}
+
+	debugLog("BarGraph: Max value for scaling: %d", maxVal)
+	if maxVal == 0 {
+		debugLog("BarGraph: Max value is 0, returning empty bars")
+		return []string{"", "", ""}
+	}
+
+	// Build 3-line compact bar graph with scale labels
+	lines := make([]string, 3)
+
+	// Determine how many hours we can fit - reserve space for scale labels
+	chartWidth := 24 // Fixed chart width
+	maxValStr := fmt.Sprintf("%d", maxVal)
+	labelWidth := len(maxValStr) + 1 // Space for max value + space
+
+	debugLog("BarGraph: Chart width: %d, label width: %d", chartWidth, labelWidth)
+
+	// Build bars for each line (top to bottom)
+	for lineIdx := 0; lineIdx < 3; lineIdx++ {
+		var line string
+
+		// Add scale label at the beginning of each line
+		if lineIdx == 0 {
+			// Top line gets the max value
+			line = fmt.Sprintf("%*s ", labelWidth-1, maxValStr)
+		} else if lineIdx == 2 {
+			// Bottom line gets "0"
+			line = fmt.Sprintf("%*s ", labelWidth-1, "0")
+		} else {
+			// Middle line gets spaces
+			line = fmt.Sprintf("%*s ", labelWidth-1, "")
+		}
+
+		// Add the chart bars
+		for pos := 0; pos < chartWidth && pos < 24; pos++ {
+			// Rolling data uses positions 0-23, where 0 is oldest, 23 is newest
+			posStr := fmt.Sprintf("%d", pos)
+			count, exists := hourlyData[posStr]
+			if !exists {
+				count = 0
+			}
+
+			// Calculate normalized height (0-3 scale, where 3 is max height)
+			normalizedHeight := float64(count) / float64(maxVal) * 3.0
+
+			// Determine which character to use for this position
+			// Line 0 = top, Line 1 = middle, Line 2 = bottom
+			lineHeight := 3 - lineIdx // 3, 2, 1 for lines 0, 1, 2
+
+			var barChar rune
+			if normalizedHeight >= float64(lineHeight) {
+				// This line should be fully filled
+				barChar = '#'
+			} else if normalizedHeight >= float64(lineHeight-1) {
+				// Partial fill based on remainder
+				remainder := normalizedHeight - float64(lineHeight-1)
+				if remainder >= 0.66 {
+					barChar = '#' // Full block
+				} else if remainder >= 0.33 {
+					barChar = '=' // Half block
+				} else if remainder > 0 {
+					barChar = '_' // Low block
+				} else {
+					barChar = ' ' // Empty
+				}
+			} else {
+				barChar = ' '
+			}
+
+			if lineIdx == 0 && pos < 5 { // Only log first few positions on top line to avoid spam
+				debugLog("BarGraph: Pos %d, Count %d, NormHeight %.2f, LineHeight %d, Char '%c'",
+					pos, count, normalizedHeight, lineHeight, barChar)
+			}
+
+			line += string(barChar)
+		}
+		lines[lineIdx] = line
+	}
+
+	return lines
+}
+
 var globalGeoIP *GeoIPManager
 var globalHPFeedsConnected bool
 var globalGeoIPAvailable bool
@@ -183,8 +472,10 @@ type TUI struct {
 	height       int
 	globe        *Globe
 	dashboard    *Dashboard
+	stats        *StatsManager
 	globeChanged bool
 	dashChanged  bool
+	statsChanged bool
 	mutex        sync.RWMutex
 }
 
@@ -331,9 +622,7 @@ func (hp *Hpfeeds) parse(opcode uint8, data []byte) {
 		hp.sendAuth(data[(1 + uint8(data[0])):])
 		hp.authSent <- true
 	case opcode_err:
-		if hp.Log {
-			log.Printf("Received error from server: %s\n", string(data))
-		}
+		debugLog("Received error from server: %s", string(data))
 	case opcode_pub:
 		len1 := uint8(data[0])
 		name := string(data[1:(1 + len1)])
@@ -342,9 +631,7 @@ func (hp *Hpfeeds) parse(opcode uint8, data []byte) {
 		payload := data[1+len1+1+len2:]
 		hp.handlePub(name, channel, payload)
 	default:
-		if hp.Log {
-			log.Printf("Received message with unknown type %d\n", opcode)
-		}
+		debugLog("Received message with unknown type %d", opcode)
 	}
 }
 
@@ -353,9 +640,6 @@ func (hp *Hpfeeds) handlePub(name string, channelName string, payload []byte) {
 	debugLog("HPFeeds: Received message from %s on channel %s: %s", name, channelName, string(payload))
 	channel, ok := hp.channel[channelName]
 	if !ok {
-		if hp.Log {
-			log.Printf("Received message on unsubscribed channel %s\n", channelName)
-		}
 		debugLog("HPFeeds: Message received on unsubscribed channel %s", channelName)
 		return
 	}
@@ -375,9 +659,7 @@ func (hp *Hpfeeds) sendRawMsg(opcode uint8, data []byte) {
 	for len(buf) > 0 {
 		n, err := hp.conn.Write(buf)
 		if err != nil {
-			if hp.Log {
-				log.Printf("Write(): %s\n", err)
-			}
+			debugLog("Write(): %s", err)
 			hp.close(err)
 			return
 		}
@@ -463,6 +745,7 @@ func NewTUI() (*TUI, error) {
 		height:       height,
 		globeChanged: true,
 		dashChanged:  true,
+		statsChanged: true,
 	}
 
 	// Dashboard is fixed at exactly 45 characters wide. This was chosen as it leaves an
@@ -477,7 +760,9 @@ func NewTUI() (*TUI, error) {
 	}
 
 	tui.globe = NewGlobe(globeWidth, height)
+	// Reserve 3 lines for stats at bottom
 	tui.dashboard = NewDashboard(height - 3)
+	tui.stats = NewStatsManager()
 
 	debugLog("TUI: Initialized with size %dx%d (globe: %d, dashboard: 45)", width, height, globeWidth)
 	return tui, nil
@@ -508,6 +793,7 @@ func (tui *TUI) HandleResize() {
 	tui.globe = NewGlobe(globeWidth, tui.height)
 
 	// Update dashboard MaxLines without creating a new instance (preserve shared reference)
+	// Reserve 3 lines for stats at bottom
 	if tui.dashboard != nil {
 		tui.dashboard.mutex.Lock()
 		newMaxLines := tui.height - 3
@@ -521,6 +807,7 @@ func (tui *TUI) HandleResize() {
 
 	tui.globeChanged = true
 	tui.dashChanged = true
+	tui.statsChanged = true
 	tui.screen.Clear()
 
 	debugLog("TUI: Resized to %dx%d (globe: %d, dashboard: 45)", tui.width, tui.height, globeWidth)
@@ -535,6 +822,12 @@ func (tui *TUI) MarkGlobeChanged() {
 func (tui *TUI) MarkDashboardChanged() {
 	tui.mutex.Lock()
 	tui.dashChanged = true
+	tui.mutex.Unlock()
+}
+
+func (tui *TUI) MarkStatsChanged() {
+	tui.mutex.Lock()
+	tui.statsChanged = true
 	tui.mutex.Unlock()
 }
 
@@ -596,13 +889,15 @@ func (tui *TUI) renderDashboard() {
 		return
 	}
 
-	dashLines := tui.dashboard.Render(tui.height)
+	// Calculate dashboard height (reserve 3 lines for stats at bottom)
+	dashboardHeight := tui.height - 3
+	dashLines := tui.dashboard.Render(dashboardHeight)
 	separatorX := tui.globe.Width + 1
 	startX := separatorX + 2 // Dashboard starts 2 chars after separator
 	dashboardWidth := 45     // Fixed dashboard width
 
-	// Clear dashboard area - exactly 45 characters plus separator area
-	for y := 0; y < tui.height; y++ {
+	// Clear dashboard area only (not the stats area)
+	for y := 0; y < dashboardHeight; y++ {
 		// Clear separator
 		tui.screen.SetContent(separatorX, y, ' ', nil, tcell.StyleDefault)
 		// Clear dashboard area
@@ -611,7 +906,7 @@ func (tui *TUI) renderDashboard() {
 		}
 	}
 
-	// Draw separator
+	// Draw separator (full height)
 	for y := 0; y < tui.height; y++ {
 		tui.screen.SetContent(separatorX, y, '|', nil,
 			tcell.StyleDefault.Foreground(tcell.ColorGray))
@@ -624,7 +919,7 @@ func (tui *TUI) renderDashboard() {
 	statusErrorStyle := tcell.StyleDefault.Foreground(tcell.ColorRed).Bold(true)
 
 	for y, line := range dashLines {
-		if y >= tui.height {
+		if y >= dashboardHeight {
 			break
 		}
 
@@ -676,9 +971,57 @@ func (tui *TUI) renderDashboard() {
 	tui.mutex.Unlock()
 }
 
+func (tui *TUI) renderStats() {
+	tui.mutex.RLock()
+	changed := tui.statsChanged
+	tui.mutex.RUnlock()
+
+	if !changed {
+		return
+	}
+
+	// Position chart at far right edge of screen
+	statsLines := tui.stats.RenderBarGraph(24) // Fixed 24-hour chart width
+	if len(statsLines) == 0 || len(statsLines[0]) == 0 {
+		return // No data to render
+	}
+
+	chartWidth := len(statsLines[0]) // Get actual width including labels
+	startX := tui.width - chartWidth // Position at far right
+	if startX < 0 {
+		startX = 0 // Ensure we don't go off screen
+	}
+
+	// Stats area starts at the bottom of the screen (last 3 lines)
+	statsStartY := tui.height - 3
+
+	// Clear stats area (3 lines)
+	clearStyle := tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorAqua)
+	for y := statsStartY; y < statsStartY+3 && y < tui.height; y++ {
+		for x := startX; x < startX+chartWidth && x < tui.width; x++ {
+			tui.screen.SetContent(x, y, ' ', nil, clearStyle)
+		}
+	}
+
+	textStyle := tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorAqua)
+
+	for i, line := range statsLines {
+		y := statsStartY + i
+		if y >= tui.height {
+			break
+		}
+		tui.drawText(startX, y, line, textStyle)
+	}
+
+	tui.mutex.Lock()
+	tui.statsChanged = false
+	tui.mutex.Unlock()
+}
+
 func (tui *TUI) Render(rotation float64) {
 	tui.renderGlobe(rotation)
 	tui.renderDashboard()
+	tui.renderStats()
 	tui.screen.Show()
 }
 
@@ -729,7 +1072,6 @@ func startHPFeedsClient(config *HPFeedsConfig, dashboard *Dashboard) error {
 	}
 
 	hp := NewHpfeeds(config.Ident, config.Secret, config.Server, port)
-	hp.Log = false // Don't log to avoid cluttering output
 
 	err = hp.Connect()
 	if err != nil {
@@ -791,7 +1133,7 @@ func startHPFeedsClient(config *HPFeedsConfig, dashboard *Dashboard) error {
 	// Handle disconnection in a separate goroutine
 	go func() {
 		<-hp.Disconnected
-		log.Println("HPFeeds connection lost, falling back to mock data")
+		debugLog("HPFeeds connection lost, falling back to mock data")
 		globalHPFeedsConnected = false
 	}()
 
@@ -1187,6 +1529,7 @@ OPTIONS:
     -h               Show this help message 
     -d <filename>    Enable debug logging to specified file
     -s <seconds>     Globe rotation period in seconds (10-300, default: 30)
+    -r <milliseconds> Globe refresh rate in milliseconds (50-1000, default: 100)
 
 CONTROLS:
     Q, X, Space, Esc    Exit the application
@@ -1204,9 +1547,11 @@ CONFIGURATION:
 
 
 	EXAMPLES:
-	go-globe                    # Default 30-second rotation
+	go-globe                    # Default 30-second rotation, 100ms refresh
 	go-globe -s 60              # Slower 60-second rotation  
 	go-globe -s 10 -d debug.log # Fast rotation with debug logging
+	go-globe -r 200             # Slower 200ms refresh rate
+	go-globe -s 15 -r 50        # Fast rotation with fast 50ms refresh
 
 	`)
 }
@@ -1215,6 +1560,7 @@ func main() {
 	var debugFile = flag.String("d", "", "Debug log filename")
 	var showHelpFlag = flag.Bool("h", false, "Show help")
 	var rotationPeriod = flag.Int("s", 30, "Globe rotation period in seconds (10-300)")
+	var refreshRate = flag.Int("r", 100, "Globe refresh rate in milliseconds (50-1000)")
 
 	flag.Parse()
 
@@ -1226,6 +1572,12 @@ func main() {
 	// Validate rotation period
 	if *rotationPeriod < 10 || *rotationPeriod > 300 {
 		fmt.Fprintf(os.Stderr, "Error: Rotation period must be between 10 and 300 seconds\n")
+		os.Exit(1)
+	}
+
+	// Validate refresh rate
+	if *refreshRate < 50 || *refreshRate > 1000 {
+		fmt.Fprintf(os.Stderr, "Error: Refresh rate must be between 50 and 1000 milliseconds\n")
 		os.Exit(1)
 	}
 
@@ -1241,6 +1593,7 @@ func main() {
 	}
 
 	debugLog("Rotation period set to %d seconds", *rotationPeriod)
+	debugLog("Globe refresh rate set to %d milliseconds", *refreshRate)
 
 	rand.Seed(time.Now().UnixNano())
 	debugLog("Application starting up")
@@ -1283,7 +1636,7 @@ func main() {
 	quit := tui.pollEvents()
 
 	// Create a shared dashboard instance for both TUI and HPFeeds
-	sharedDashboard := NewDashboard(tui.height - 3)
+	sharedDashboard := NewDashboard(tui.height - 3) // Reserve space for stats
 	tui.dashboard = sharedDashboard
 	debugLog("Created shared dashboard at pointer: %p", sharedDashboard)
 
@@ -1291,17 +1644,14 @@ func main() {
 	config, err := readHPFeedsConfig("hpfeeds.conf")
 	useLiveData := false
 	if err != nil {
-		log.Printf("Warning: Could not read HPFeeds config: %v. Using mock data.", err)
 		debugLog("HPFeeds config error: %v", err)
 	} else {
 		debugLog("HPFeeds config loaded: server=%s:%s channel=%s", config.Server, config.Port, config.Channel)
 		debugLog("Dashboard pointer for HPFeeds: %p", sharedDashboard)
 		err = startHPFeedsClient(config, sharedDashboard)
 		if err != nil {
-			log.Printf("Warning: Could not start HPFeeds client: %v. Using mock data.", err)
 			debugLog("HPFeeds client connection failed: %v", err)
 		} else {
-			log.Println("HPFeeds client started successfully. Showing live honeypot data.")
 			debugLog("HPFeeds client connected successfully")
 			globalHPFeedsConnected = true
 			useLiveData = true
@@ -1311,9 +1661,19 @@ func main() {
 	startTime := time.Now()
 	lastConnectionTime := time.Now()
 	lastGlobeUpdate := time.Now()
+	lastStatsUpdate := time.Now()
 
 	// Random interval for mock data generation (0.2 to 5 seconds)
 	nextMockInterval := time.Duration(200+rand.Intn(4800)) * time.Millisecond
+
+	// Fetch initial stats data
+	go func() {
+		if err := tui.stats.FetchData(); err != nil {
+			debugLog("Stats: Initial fetch failed: %v", err)
+		} else {
+			tui.MarkStatsChanged()
+		}
+	}()
 
 	// Main rendering loop
 	for {
@@ -1329,8 +1689,8 @@ func main() {
 
 		now := time.Now()
 
-		// Update globe rotation (mark as changed every 100ms for smooth animation)
-		if now.Sub(lastGlobeUpdate) >= 100*time.Millisecond {
+		// Update globe rotation (mark as changed based on configurable refresh rate)
+		if now.Sub(lastGlobeUpdate) >= time.Duration(*refreshRate)*time.Millisecond {
 			tui.MarkGlobeChanged()
 			lastGlobeUpdate = now
 		}
@@ -1341,6 +1701,18 @@ func main() {
 			lastConnectionTime = now
 			// Generate new random interval for next mock data (0.2 to 5 seconds)
 			nextMockInterval = time.Duration(200+rand.Intn(4800)) * time.Millisecond
+		}
+
+		// Update stats data every 5 minutes
+		if now.Sub(lastStatsUpdate) >= 300*time.Second {
+			go func() {
+				if err := tui.stats.FetchData(); err != nil {
+					debugLog("Stats: Periodic fetch failed: %v", err)
+				} else {
+					tui.MarkStatsChanged()
+				}
+			}()
+			lastStatsUpdate = now
 		}
 
 		// Calculate rotation using configurable period
