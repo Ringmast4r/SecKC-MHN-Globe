@@ -99,22 +99,22 @@ var debugLogger *log.Logger
 
 // Global color variables for theming
 var (
-	colorBackground    tcell.Color
-	colorText          tcell.Color
-	colorGlobe         tcell.Color
-	colorAttack        tcell.Color
-	colorDashboard     tcell.Color
-	colorStats         tcell.Color
-	colorSeparator     tcell.Color
-	colorStatusOk      tcell.Color
-	colorStatusError   tcell.Color
+	colorBackground  tcell.Color
+	colorText        tcell.Color
+	colorGlobe       tcell.Color
+	colorAttack      tcell.Color
+	colorDashboard   tcell.Color
+	colorStats       tcell.Color
+	colorSeparator   tcell.Color
+	colorStatusOk    tcell.Color
+	colorStatusError tcell.Color
 )
 
 // initializeColors sets up the global color variables based on monochrome mode
 func initializeColors(monochrome bool) {
 	// Background is always black
 	colorBackground = tcell.ColorBlack
-	
+
 	if monochrome {
 		colorText = tcell.ColorWhite
 		colorGlobe = tcell.ColorWhite
@@ -515,19 +515,21 @@ type TUI struct {
 	globeChanged bool
 	dashChanged  bool
 	statsChanged bool
+	aspectRatio  float64
 	mutex        sync.RWMutex
 }
 
 type Globe struct {
-	Radius    float64
-	Width     int
-	Height    int
-	EarthMap  []string
-	MapWidth  int
-	MapHeight int
+	Radius      float64
+	Width       int
+	Height      int
+	EarthMap    []string
+	MapWidth    int
+	MapHeight   int
+	AspectRatio float64
 }
 
-func NewGlobe(width, height int) *Globe {
+func NewGlobe(width, height int, aspectRatio float64) *Globe {
 	// Ensure minimum dimensions to prevent panics
 	if width < 1 {
 		width = 1
@@ -538,7 +540,7 @@ func NewGlobe(width, height int) *Globe {
 
 	// Use provided dimensions directly (TUI now handles sizing)
 	globeWidth := width
-	effectiveHeight := float64(height) * 2
+	effectiveHeight := float64(height) * aspectRatio
 	radius := math.Min(float64(globeWidth)/2.5, effectiveHeight/2.5)
 
 	// Ensure minimum radius
@@ -548,12 +550,13 @@ func NewGlobe(width, height int) *Globe {
 
 	earthMap := getEarthBitmap()
 	return &Globe{
-		Radius:    radius,
-		Width:     globeWidth,
-		Height:    height,
-		EarthMap:  earthMap,
-		MapWidth:  len(earthMap[0]),
-		MapHeight: len(earthMap),
+		Radius:      radius,
+		Width:       globeWidth,
+		Height:      height,
+		EarthMap:    earthMap,
+		MapWidth:    len(earthMap[0]),
+		MapHeight:   len(earthMap),
+		AspectRatio: aspectRatio,
 	}
 }
 
@@ -763,7 +766,7 @@ func debugLog(format string, v ...interface{}) {
 	}
 }
 
-func NewTUI() (*TUI, error) {
+func NewTUI(aspectRatio float64) (*TUI, error) {
 	screen, err := tcell.NewScreen()
 	if err != nil {
 		return nil, err
@@ -785,6 +788,7 @@ func NewTUI() (*TUI, error) {
 		globeChanged: true,
 		dashChanged:  true,
 		statsChanged: true,
+		aspectRatio:  aspectRatio,
 	}
 
 	// Dashboard is fixed at exactly 45 characters wide. This was chosen as it leaves an
@@ -798,7 +802,7 @@ func NewTUI() (*TUI, error) {
 		globeWidth = 10
 	}
 
-	tui.globe = NewGlobe(globeWidth, height)
+	tui.globe = NewGlobe(globeWidth, height, aspectRatio)
 	// Reserve 4 lines for stats header and chart at bottom
 	tui.dashboard = NewDashboard(height - 4)
 	tui.stats = NewStatsManager()
@@ -829,7 +833,7 @@ func (tui *TUI) HandleResize() {
 		globeWidth = 10
 	}
 
-	tui.globe = NewGlobe(globeWidth, tui.height)
+	tui.globe = NewGlobe(globeWidth, tui.height, tui.aspectRatio)
 
 	// Update dashboard MaxLines without creating a new instance (preserve shared reference)
 	// Reserve 4 lines for stats header and chart at bottom
@@ -1038,7 +1042,7 @@ func (tui *TUI) renderStats() {
 		return // No data to render
 	}
 
-	chartWidth := len(statsLines[0]) // Get actual width including labels
+	chartWidth := len(statsLines[0])     // Get actual width including labels
 	startX := tui.width - chartWidth - 7 // Position 7 characters left from far right
 	if startX < 0 {
 		startX = 0 // Ensure we don't go off screen
@@ -1371,7 +1375,7 @@ func (g *Globe) project3DTo2D(lat, lon, rotation float64) (int, int, bool) {
 
 	// Project to 2D screen coordinates
 	screenX := int(x*g.Radius) + g.Width/2
-	screenY := int(-y*g.Radius/2) + g.Height/2 // Compress Y by factor of 2 for character aspect ratio
+	screenY := int(-y*g.Radius/g.AspectRatio) + g.Height/2 // Compress Y by aspect ratio for character aspect ratio
 
 	// Check bounds
 	if screenX < 0 || screenX >= g.Width || screenY < 0 || screenY >= g.Height {
@@ -1438,7 +1442,7 @@ func (g *Globe) render(rotation float64) [][]rune {
 		for x := 0; x < g.Width; x++ {
 			// Calculate distance from center, accounting for character aspect ratio
 			dx := float64(x - centerX)
-			dy := float64(y-centerY) * 2 // Compress Y for character aspect ratio
+			dy := float64(y-centerY) * g.AspectRatio // Compress Y for character aspect ratio
 			distance := math.Sqrt(dx*dx + dy*dy)
 
 			if distance <= g.Radius {
@@ -1583,6 +1587,7 @@ OPTIONS:
     -s <seconds>     Globe rotation period in seconds (10-300, default: 30)
     -r <milliseconds> Globe refresh rate in milliseconds (50-1000, default: 100)
     -m               Enable monochrome mode (all colors set to white)
+    -a <ratio>       Character aspect ratio (height/width, 1.0-4.0, default: 2.0)
 
 CONTROLS:
     Q, X, Space, Esc    Exit the application
@@ -1600,12 +1605,14 @@ CONFIGURATION:
 
 
 	EXAMPLES:
-	go-globe                    # Default 30-second rotation, 100ms refresh
+	go-globe                    # Default 30-second rotation, 100ms refresh, 2.0 aspect ratio
 	go-globe -s 60              # Slower 60-second rotation  
 	go-globe -s 10 -d debug.log # Fast rotation with debug logging
 	go-globe -r 200             # Slower 200ms refresh rate
 	go-globe -s 15 -r 50        # Fast rotation with fast 50ms refresh
 	go-globe -m                 # Monochrome mode for terminals with limited colors
+	go-globe -a 1.5             # Wider globe for narrow characters (aspect ratio 1.5)
+	go-globe -a 3.0             # Narrower globe for wide characters (aspect ratio 3.0)
 
 	`)
 }
@@ -1616,6 +1623,7 @@ func main() {
 	var rotationPeriod = flag.Int("s", 30, "Globe rotation period in seconds (10-300)")
 	var refreshRate = flag.Int("r", 100, "Globe refresh rate in milliseconds (50-1000)")
 	var monochrome = flag.Bool("m", false, "Enable monochrome mode (all colors set to white)")
+	var aspectRatio = flag.Float64("a", 2.0, "Character aspect ratio (height/width, 1.0-4.0)")
 
 	flag.Parse()
 
@@ -1633,6 +1641,12 @@ func main() {
 	// Validate refresh rate
 	if *refreshRate < 50 || *refreshRate > 1000 {
 		fmt.Fprintf(os.Stderr, "Error: Refresh rate must be between 50 and 1000 milliseconds\n")
+		os.Exit(1)
+	}
+
+	// Validate aspect ratio
+	if *aspectRatio < 1.0 || *aspectRatio > 4.0 {
+		fmt.Fprintf(os.Stderr, "Error: Aspect ratio must be between 1.0 and 4.0\n")
 		os.Exit(1)
 	}
 
@@ -1686,7 +1700,7 @@ func main() {
 	}
 
 	// Initialize TUI
-	tui, err := NewTUI()
+	tui, err := NewTUI(*aspectRatio)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing TUI: %v\n", err)
 		os.Exit(1)
@@ -1718,7 +1732,7 @@ func main() {
 			Channel: "cowrie.sessions",
 		}
 	}
-	
+
 	debugLog("HPFeeds config: server=%s:%s channel=%s ident=%s", config.Server, config.Port, config.Channel, config.Ident)
 	debugLog("Dashboard pointer for HPFeeds: %p", sharedDashboard)
 	err = startHPFeedsClient(config, sharedDashboard)
