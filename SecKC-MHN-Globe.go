@@ -1,10 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"crypto/sha1"
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,7 +8,6 @@ import (
 	"log"
 	"math"
 	"math/rand"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/oschwald/geoip2-golang"
 )
 
 type Connection struct {
@@ -31,43 +25,43 @@ type Connection struct {
 	Time     time.Time
 }
 
-type HPFeedsConfig struct {
-	Ident   string
-	Secret  string
-	Server  string
-	Port    string
-	Channel string
+type APIConfig struct {
+	BaseURL       string
+	PollInterval  time.Duration
+	MaxEvents     int
 }
 
-type HPFeedsMessage struct {
-	Name    string
-	Payload []byte
+type APIClient struct {
+	config      *APIConfig
+	httpClient  *http.Client
+	lastEventTS float64
 }
 
-type rawMsgHeader struct {
-	Length uint32
-	Opcode uint8
+type APIEvent struct {
+	Event     map[string]interface{} `json:"event"`
+	Timestamp float64                `json:"timestamp"`
+	CachedAt  string                 `json:"cached_at"`
 }
 
-const (
-	opcode_err  = 0
-	opcode_info = 1
-	opcode_auth = 2
-	opcode_pub  = 3
-	opcode_sub  = 4
-)
+type APIResponse struct {
+	Events        []APIEvent `json:"events"`
+	Count         int        `json:"count"`
+	Authenticated bool       `json:"authenticated"`
+	ServerTime    float64    `json:"server_time"`
+}
 
-type Hpfeeds struct {
-	LocalAddr    net.TCPAddr
-	conn         *net.TCPConn
-	host         string
-	port         int
-	ident        string
-	auth         string
-	channel      map[string]chan HPFeedsMessage
-	authSent     chan bool
-	Disconnected chan error
-	Log          bool
+type GeocodeResponse struct {
+	City struct {
+		Names map[string]string `json:"names"`
+	} `json:"city"`
+	Country struct {
+		ISOCode string            `json:"iso_code"`
+		Names   map[string]string `json:"names"`
+	} `json:"country"`
+	Location struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	} `json:"location"`
 }
 
 type CowrieSession struct {
@@ -136,10 +130,20 @@ func initializeColors(monochrome bool) {
 	}
 }
 
-type GeoIPManager struct {
-	db    *geoip2.Reader
-	mutex sync.RWMutex
+type GeocodeCache struct {
+	IP        string
+	Location  LocationInfo
+	Timestamp time.Time
 }
+
+type GeoIPManager struct {
+	apiClient *APIClient
+	cache     map[string]GeocodeCache
+	cacheList []string // For LRU eviction
+	maxCache  int
+	mutex     sync.RWMutex
+}
+
 
 type LocationInfo struct {
 	City      string
@@ -166,69 +170,178 @@ type StatsManager struct {
 	yesterdayURL  string
 }
 
-func NewGeoIPManager() *GeoIPManager {
-	return &GeoIPManager{}
+func NewAPIClient(config *APIConfig) *APIClient {
+	return &APIClient{
+		config: config,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		lastEventTS: 0,
+	}
 }
 
-func (g *GeoIPManager) LoadDatabase(dbPath string) error {
-	g.mutex.Lock()
-	defer g.mutex.Unlock()
-
-	if g.db != nil {
-		g.db.Close()
-	}
-
-	db, err := geoip2.Open(dbPath)
-	if err != nil {
-		return err
-	}
-
-	g.db = db
-	debugLog("GeoIP: Database loaded from %s", dbPath)
-	return nil
-}
-
-func (g *GeoIPManager) Close() {
-	g.mutex.Lock()
-	defer g.mutex.Unlock()
-
-	if g.db != nil {
-		g.db.Close()
-		g.db = nil
+func NewGeoIPManager(apiClient *APIClient) *GeoIPManager {
+	return &GeoIPManager{
+		apiClient: apiClient,
+		cache:     make(map[string]GeocodeCache),
+		cacheList: make([]string, 0),
+		maxCache:  2000, // Cache up to 2000 IP addresses
 	}
 }
 
 func (g *GeoIPManager) LookupIP(ipStr string) LocationInfo {
+	// First check cache (read lock)
 	g.mutex.RLock()
-	defer g.mutex.RUnlock()
+	if cached, exists := g.cache[ipStr]; exists {
+		g.mutex.RUnlock()
+		debugLog("Geocode Cache: Hit for %s (cached %v ago)", ipStr, time.Since(cached.Timestamp))
+		// Move to front of LRU list (requires write lock)
+		g.moveToFront(ipStr)
+		return cached.Location
+	}
+	g.mutex.RUnlock()
 
-	if g.db == nil {
+	// Cache miss - need to make API call
+	debugLog("Geocode Cache: Miss for %s, making API call", ipStr)
+	location := g.fetchFromAPI(ipStr)
+	
+	// Add to cache if valid
+	if location.Valid {
+		g.addToCache(ipStr, location)
+	}
+	
+	return location
+}
+
+func (g *GeoIPManager) fetchFromAPI(ipStr string) LocationInfo {
+	if g.apiClient == nil {
 		return LocationInfo{Valid: false}
 	}
 
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return LocationInfo{Valid: false}
-	}
-
-	record, err := g.db.City(ip)
+	// Make API call to geocode endpoint
+	url := fmt.Sprintf("%s/geocode/%s", strings.TrimSuffix(g.apiClient.config.BaseURL, "/"), ipStr)
+	resp, err := g.apiClient.httpClient.Get(url)
 	if err != nil {
-		debugLog("GeoIP: Failed to lookup %s: %v", ipStr, err)
+		debugLog("Geocode API: Failed to request %s: %v", ipStr, err)
+		return LocationInfo{Valid: false}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		debugLog("Geocode API: Request failed for %s: status %d", ipStr, resp.StatusCode)
+		return LocationInfo{Valid: false}
+	}
+
+	var geocodeResp GeocodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&geocodeResp); err != nil {
+		debugLog("Geocode API: Failed to decode response for %s: %v", ipStr, err)
 		return LocationInfo{Valid: false}
 	}
 
 	locationInfo := LocationInfo{
-		City:      record.City.Names["en"],
-		Country:   record.Country.Names["en"],
-		Latitude:  record.Location.Latitude,
-		Longitude: record.Location.Longitude,
+		City:      geocodeResp.City.Names["en"],
+		Country:   geocodeResp.Country.Names["en"],
+		Latitude:  geocodeResp.Location.Latitude,
+		Longitude: geocodeResp.Location.Longitude,
 		Valid:     true,
 	}
 
-	debugLog("GeoIP: %s located at %.4f,%.4f (%s, %s)",
+	debugLog("Geocode API: %s located at %.4f,%.4f (%s, %s)",
 		ipStr, locationInfo.Latitude, locationInfo.Longitude, locationInfo.City, locationInfo.Country)
 
 	return locationInfo
+}
+
+func (g *GeoIPManager) addToCache(ipStr string, location LocationInfo) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+
+	// Check if we need to evict oldest entry
+	if len(g.cache) >= g.maxCache {
+		g.evictOldest()
+	}
+
+	// Add new entry
+	g.cache[ipStr] = GeocodeCache{
+		IP:        ipStr,
+		Location:  location,
+		Timestamp: time.Now(),
+	}
+	
+	// Add to front of LRU list
+	g.cacheList = append([]string{ipStr}, g.cacheList...)
+	
+	debugLog("Geocode Cache: Added %s (cache size: %d/%d)", ipStr, len(g.cache), g.maxCache)
+}
+
+func (g *GeoIPManager) moveToFront(ipStr string) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+
+	// Find and remove from current position
+	for i, ip := range g.cacheList {
+		if ip == ipStr {
+			// Remove from current position
+			g.cacheList = append(g.cacheList[:i], g.cacheList[i+1:]...)
+			break
+		}
+	}
+	
+	// Add to front
+	g.cacheList = append([]string{ipStr}, g.cacheList...)
+}
+
+func (g *GeoIPManager) evictOldest() {
+	// Remove oldest entry (must be called with write lock held)
+	if len(g.cacheList) == 0 {
+		return
+	}
+	
+	oldestIP := g.cacheList[len(g.cacheList)-1]
+	delete(g.cache, oldestIP)
+	g.cacheList = g.cacheList[:len(g.cacheList)-1]
+	
+	debugLog("Geocode Cache: Evicted oldest entry %s", oldestIP)
+}
+
+
+func (g *GeoIPManager) GetCacheStats() (int, int) {
+	g.mutex.RLock()
+	defer g.mutex.RUnlock()
+	return len(g.cache), g.maxCache
+}
+
+func (api *APIClient) GetRecentEvents() ([]APIEvent, error) {
+	url := fmt.Sprintf("%s/feeds/events/recent", strings.TrimSuffix(api.config.BaseURL, "/"))
+	
+	// Add query parameters
+	if api.lastEventTS > 0 {
+		url = fmt.Sprintf("%s?since=%.1f&limit=%d", url, api.lastEventTS, api.config.MaxEvents)
+	} else {
+		url = fmt.Sprintf("%s?limit=%d", url, api.config.MaxEvents)
+	}
+
+	resp, err := api.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("API request failed: status %d", resp.StatusCode)
+	}
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	// Update last event timestamp
+	if len(apiResp.Events) > 0 {
+		api.lastEventTS = apiResp.Events[len(apiResp.Events)-1].Timestamp
+	}
+
+	return apiResp.Events, nil
 }
 
 func NewStatsManager() *StatsManager {
@@ -502,7 +615,7 @@ func (s *StatsManager) RenderBarGraph(width int) []string {
 }
 
 var globalGeoIP *GeoIPManager
-var globalHPFeedsConnected bool
+var globalAPIConnected bool
 var globalGeoIPAvailable bool
 
 type TUI struct {
@@ -568,167 +681,17 @@ func NewDashboard(maxLines int) *Dashboard {
 	return d
 }
 
-func readHPFeedsConfig(filename string) (*HPFeedsConfig, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open hpfeeds.conf file: %v", err)
+func createAPIConfig(baseURL string, pollInterval time.Duration, maxEvents int) *APIConfig {
+	config := &APIConfig{
+		BaseURL:      baseURL,
+		PollInterval: pollInterval,
+		MaxEvents:    maxEvents,
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	if !scanner.Scan() {
-		return nil, fmt.Errorf("hpfeeds.conf file is empty")
-	}
-
-	line := scanner.Text()
-	parts := strings.Fields(line)
-	if len(parts) != 5 {
-		return nil, fmt.Errorf("invalid hpfeeds.conf format, expected 5 parts: ident secret server port channel")
-	}
-
-	return &HPFeedsConfig{
-		Ident:   parts[0],
-		Secret:  parts[1],
-		Server:  parts[2],
-		Port:    parts[3],
-		Channel: parts[4],
-	}, nil
+	debugLog("API Config: Using base_url=%s, poll_interval=%v, max_events=%d", 
+		config.BaseURL, config.PollInterval, config.MaxEvents)
+	return config
 }
 
-func NewHpfeeds(ident, auth, host string, port int) *Hpfeeds {
-	return &Hpfeeds{
-		ident:        ident,
-		auth:         auth,
-		host:         host,
-		port:         port,
-		channel:      make(map[string]chan HPFeedsMessage),
-		authSent:     make(chan bool),
-		Disconnected: make(chan error),
-		Log:          false,
-	}
-}
-
-func (hp *Hpfeeds) Connect() error {
-	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", hp.host, hp.port))
-	if err != nil {
-		return err
-	}
-	hp.conn, err = net.DialTCP("tcp", &hp.LocalAddr, addr)
-	if err != nil {
-		return err
-	}
-	go hp.readLoop()
-	<-hp.authSent
-	return nil
-}
-
-func (hp *Hpfeeds) close(err error) {
-	if hp.conn != nil {
-		hp.conn.Close()
-		hp.conn = nil
-	}
-	select {
-	case hp.Disconnected <- err:
-	default:
-	}
-}
-
-func (hp *Hpfeeds) readLoop() {
-	buf := make([]byte, 0, 1024)
-	for {
-		tmpbuf := make([]byte, 1024)
-		n, err := hp.conn.Read(tmpbuf)
-		if err != nil {
-			hp.close(err)
-			return
-		}
-		buf = append(buf, tmpbuf[:n]...)
-		for len(buf) >= 5 {
-			var hdr rawMsgHeader
-			hdr.Length = binary.BigEndian.Uint32(buf)
-			hdr.Opcode = uint8(buf[4])
-			if len(buf) < int(hdr.Length) {
-				break
-			}
-			data := buf[5:int(hdr.Length)]
-			hp.parse(hdr.Opcode, data)
-			buf = buf[int(hdr.Length):]
-		}
-	}
-}
-
-func (hp *Hpfeeds) parse(opcode uint8, data []byte) {
-	switch opcode {
-	case opcode_info:
-		hp.sendAuth(data[(1 + uint8(data[0])):])
-		hp.authSent <- true
-	case opcode_err:
-		debugLog("Received error from server: %s", string(data))
-	case opcode_pub:
-		len1 := uint8(data[0])
-		name := string(data[1:(1 + len1)])
-		len2 := uint8(data[1+len1])
-		channel := string(data[(1 + len1 + 1):(1 + len1 + 1 + len2)])
-		payload := data[1+len1+1+len2:]
-		hp.handlePub(name, channel, payload)
-	default:
-		debugLog("Received message with unknown type %d", opcode)
-	}
-}
-
-func (hp *Hpfeeds) handlePub(name string, channelName string, payload []byte) {
-	// Note that this hpfeeds implementation has only been tested with the cowrie.sessions channel
-	debugLog("HPFeeds: Received message from %s on channel %s: %s", name, channelName, string(payload))
-	channel, ok := hp.channel[channelName]
-	if !ok {
-		debugLog("HPFeeds: Message received on unsubscribed channel %s", channelName)
-		return
-	}
-	channel <- HPFeedsMessage{name, payload}
-}
-
-func writeField(buf *bytes.Buffer, data []byte) {
-	buf.WriteByte(byte(len(data)))
-	buf.Write(data)
-}
-
-func (hp *Hpfeeds) sendRawMsg(opcode uint8, data []byte) {
-	buf := make([]byte, 5)
-	binary.BigEndian.PutUint32(buf, uint32(5+len(data)))
-	buf[4] = byte(opcode)
-	buf = append(buf, data...)
-	for len(buf) > 0 {
-		n, err := hp.conn.Write(buf)
-		if err != nil {
-			debugLog("Write(): %s", err)
-			hp.close(err)
-			return
-		}
-		buf = buf[n:]
-	}
-}
-
-func (hp *Hpfeeds) sendAuth(nonce []byte) {
-	buf := new(bytes.Buffer)
-	mac := sha1.New()
-	mac.Write(nonce)
-	mac.Write([]byte(hp.auth))
-	writeField(buf, []byte(hp.ident))
-	buf.Write(mac.Sum(nil))
-	hp.sendRawMsg(opcode_auth, buf.Bytes())
-}
-
-func (hp *Hpfeeds) sendSub(channelName string) {
-	buf := new(bytes.Buffer)
-	writeField(buf, []byte(hp.ident))
-	buf.Write([]byte(channelName))
-	hp.sendRawMsg(opcode_sub, buf.Bytes())
-}
-
-func (hp *Hpfeeds) Subscribe(channelName string, channel chan HPFeedsMessage) {
-	hp.channel[channelName] = channel
-	hp.sendSub(channelName)
-}
 
 func generateRandomIP() string {
 	// Randomized IP addresses for mock connections
@@ -1119,76 +1082,86 @@ func (d *Dashboard) GenerateRandomConnection() {
 	d.AddConnection(ip, username, password)
 }
 
-func startHPFeedsClient(config *HPFeedsConfig, dashboard *Dashboard) error {
-	port, err := strconv.Atoi(config.Port)
-	if err != nil {
-		return fmt.Errorf("invalid port: %v", err)
-	}
-
-	hp := NewHpfeeds(config.Ident, config.Secret, config.Server, port)
-
-	err = hp.Connect()
-	if err != nil {
-		return fmt.Errorf("failed to connect to HPFeeds: %v", err)
-	}
-
-	debugLog("HPFeeds: Connected successfully, subscribing to channel '%s'", config.Channel)
-
-	firehose := make(chan HPFeedsMessage)
-	hp.Subscribe(config.Channel, firehose)
-
-	debugLog("HPFeeds: Subscribed to channel, starting message handler")
+func startAPIClient(apiClient *APIClient, dashboard *Dashboard) error {
+	debugLog("API Client: Starting to poll events from %s", apiClient.config.BaseURL)
 
 	go func() {
-		msgCount := 0
-		for msg := range firehose {
-			msgCount++
-			debugLog("HPFeeds: Received message #%d from %s", msgCount, msg.Name)
+		ticker := time.NewTicker(apiClient.config.PollInterval)
+		defer ticker.Stop()
 
-			var session CowrieSession
-			if err := json.Unmarshal(msg.Payload, &session); err == nil {
-				// Successfully parsed cowrie session data
-				var username, password string
-
-				// Extract username/password from loggedin array [username, password]
-				if len(session.LoggedIn) >= 2 {
-					username = session.LoggedIn[0]
-					password = session.LoggedIn[1]
+		for {
+			select {
+			case <-ticker.C:
+				events, err := apiClient.GetRecentEvents()
+				if err != nil {
+					debugLog("API Client: Failed to get events: %v", err)
+					globalAPIConnected = false
+					continue
 				}
 
-				// Use peerIP as the IP address
-				ipAddress := session.PeerIP
+				globalAPIConnected = true
+				debugLog("API Client: Retrieved %d events", len(events))
 
-				// Lookup geolocation information (debug logging happens in LookupIP function)
-				//var locationInfo LocationInfo
-				//if globalGeoIP != nil && ipAddress != "" {
-				//	locationInfo := globalGeoIP.LookupIP(ipAddress)
-				//}
+				for _, apiEvent := range events {
+					// Process each event
+					eventData := apiEvent.Event
 
-				if ipAddress != "" {
-					if username != "" && password != "" {
-						debugLog("HPFeeds: Adding successful login to dashboard")
-						dashboard.AddConnection(ipAddress, username, password)
-					} else {
-						debugLog("HPFeeds: Adding connection attempt (no successful login) to dashboard")
-						dashboard.AddConnection(ipAddress, "connection", session.Protocol)
+					// Extract IP address from the event
+					var ipAddress string
+					if srcIP, ok := eventData["src_ip"].(string); ok {
+						ipAddress = srcIP
+					} else if peerIP, ok := eventData["peerIP"].(string); ok {
+						ipAddress = peerIP
 					}
-				} else {
-					debugLog("HPFeeds: Skipping session data - no peerIP address")
+
+					if ipAddress == "" {
+						debugLog("API Client: Event has no IP address, skipping")
+						continue
+					}
+
+					// Extract credentials if available
+					var username, password string
+					if loggedin, ok := eventData["loggedin"].([]interface{}); ok && len(loggedin) >= 2 {
+						if user, ok := loggedin[0].(string); ok {
+							username = user
+						}
+						if pass, ok := loggedin[1].(string); ok {
+							password = pass
+						}
+					}
+
+					// Fallback to other credential fields
+					if username == "" {
+						if user, ok := eventData["username"].(string); ok {
+							username = user
+						}
+					}
+					if password == "" {
+						if pass, ok := eventData["password"].(string); ok {
+							password = pass
+						}
+					}
+
+					// Use protocol if no credentials
+					if username == "" && password == "" {
+						if protocol, ok := eventData["protocol"].(string); ok {
+							username = "connection"
+							password = protocol
+						}
+					}
+
+					if username == "" {
+						username = "unknown"
+					}
+					if password == "" {
+						password = "unknown"
+					}
+
+					debugLog("API Client: Adding connection %s:%s@%s", username, password, ipAddress)
+					dashboard.AddConnection(ipAddress, username, password)
 				}
-			} else {
-				debugLog("HPFeeds: Failed to parse JSON payload: %v", err)
-				debugLog("HPFeeds: Raw payload: %s", string(msg.Payload))
 			}
 		}
-		debugLog("HPFeeds: Message handler goroutine exited")
-	}()
-
-	// Handle disconnection in a separate goroutine
-	go func() {
-		<-hp.Disconnected
-		debugLog("HPFeeds connection lost, falling back to mock data")
-		globalHPFeedsConnected = false
 	}()
 
 	return nil
@@ -1202,15 +1175,15 @@ func (d *Dashboard) Render(height int) []string {
 	lines := make([]string, height)
 
 	// Header with status indicators - fit within 45 chars
-	hpfeedsStatus := "!"
-	if globalHPFeedsConnected {
-		hpfeedsStatus = "+"
+	apiStatus := "!"
+	if globalAPIConnected {
+		apiStatus = "+"
 	}
 	geoipStatus := "!"
 	if globalGeoIPAvailable {
 		geoipStatus = "+"
 	}
-	headerLine := fmt.Sprintf("SecKC MHN TUI | HPFeeds [%s]  GeoIP [%s]", hpfeedsStatus, geoipStatus)
+	headerLine := fmt.Sprintf("SecKC MHN TUI | API [%s]  GeoCode [%s]", apiStatus, geoipStatus)
 	// Ensure it fits within 45 chars (should be 52 chars)
 	if len(headerLine) > 45 {
 		headerLine = headerLine[:45]
@@ -1356,8 +1329,15 @@ func (g *Globe) sampleEarthAt(lat, lon float64) rune {
 }
 
 func (g *Globe) project3DTo2D(lat, lon, rotation float64) (int, int, bool) {
-	// Adjust longitude to better match Earth bitmap coordinate system
-	adjustedLon := lon - 70
+	// Invert longitude and add offset to align coordinate system
+	adjustedLon := -lon + 90  // Increase offset to move Florida westward from Atlantic toward correct position
+	// Wrap longitude to -180..180 range
+	for adjustedLon < -180 {
+		adjustedLon += 360
+	}
+	for adjustedLon > 180 {
+		adjustedLon -= 360
+	}
 	// Convert lat/lon to 3D coordinates
 	latRad := lat * math.Pi / 180
 	lonRad := (adjustedLon + rotation*180/math.Pi) * math.Pi / 180
@@ -1573,8 +1553,8 @@ func showHelp() {
 
 DESCRIPTION:
     Terminal-based application displaying a rotating 3D ASCII globe with a live
-    dashboard of incoming connection attempts. Connects to HPFeeds (honeypot 
-    data feeds) to show real-time attack data from security honeypots worldwide.
+    dashboard of incoming connection attempts. Connects to the SecKC API to show 
+    real-time attack data from security honeypots worldwide.
 
 USAGE:
     go-globe [OPTIONS]
@@ -1586,31 +1566,31 @@ OPTIONS:
     -r <milliseconds> Globe refresh rate in milliseconds (50-1000, default: 100)
     -m               Enable monochrome mode (all colors set to white)
     -a <ratio>       Character aspect ratio (height/width, 1.0-4.0, default: 2.0)
+    -u <url>         Base URL for SecKC API (default: https://mhn.h-i-r.net/seckcapi)
+    -e <count>       Maximum events to fetch per API call (1-500, default: 50)
+    -p <duration>    API polling interval (1s-300s, default: 2s)
 
 CONTROLS:
     Q, X, Space, Esc    Exit the application
 
 CONFIGURATION:
-    Optional: Place HPFeeds credentials in 'hpfeeds.conf' with format:
-    <ident> <secret> <server> <port> <channel>
-
-	Mock data is generated if HPFeeds is unconfigured or unavailable.
+    All settings are configured via command-line flags.
     
-	Optional: Place GeoLite2-City.mmdb in current directory for IP geolocation
-	Register for free download from: https://www.maxmind.com/en/geolite2/signup
+    Mock data is generated if the API is unavailable.
+    
+    IP geolocation is provided via the SecKC API /geocode endpoint.
+    Globe spins without any locations marked if geocoding is unavailable.
 
-	Globe spins without any locations marked if GeoIP database is not available.
-
-
-	EXAMPLES:
-	go-globe                    # Default 30-second rotation, 100ms refresh, 2.0 aspect ratio
-	go-globe -s 60              # Slower 60-second rotation  
-	go-globe -s 10 -d debug.log # Fast rotation with debug logging
-	go-globe -r 200             # Slower 200ms refresh rate
-	go-globe -s 15 -r 50        # Fast rotation with fast 50ms refresh
-	go-globe -m                 # Monochrome mode for terminals with limited colors
-	go-globe -a 1.5             # Wider globe for narrow characters (aspect ratio 1.5)
-	go-globe -a 3.0             # Narrower globe for wide characters (aspect ratio 3.0)
+EXAMPLES:
+    go-globe                    # Default settings: 30s rotation, 2s polling, 50 events
+    go-globe -s 60              # Slower 60-second rotation  
+    go-globe -s 10 -d debug.log # Fast rotation with debug logging
+    go-globe -r 200             # Slower 200ms refresh rate
+    go-globe -p 5s              # Poll API every 5 seconds instead of 2s
+    go-globe -e 100             # Fetch up to 100 events per API call
+    go-globe -u http://localhost:5000/api  # Use local API server
+    go-globe -m                 # Monochrome mode for terminals with limited colors
+    go-globe -a 1.5             # Wider globe for narrow characters (aspect ratio 1.5)
 
 	`)
 }
@@ -1622,7 +1602,10 @@ func main() {
 	var refreshRate = flag.Int("r", 100, "Globe refresh rate in milliseconds (50-1000)")
 	var monochrome = flag.Bool("m", false, "Enable monochrome mode (all colors set to white)")
 	var aspectRatio = flag.Float64("a", 2.0, "Character aspect ratio (height/width, 1.0-4.0)")
-
+	var baseURL = flag.String("u", "https://mhn.h-i-r.net/seckcapi", "Base URL for SecKC API")
+	var maxEvents = flag.Int("e", 50, "Maximum events to fetch per API call (1-500)")
+	var pollInterval = flag.Duration("p", 2*time.Second, "API polling interval")
+	
 	flag.Parse()
 
 	if *showHelpFlag {
@@ -1645,6 +1628,18 @@ func main() {
 	// Validate aspect ratio
 	if *aspectRatio < 1.0 || *aspectRatio > 4.0 {
 		fmt.Fprintf(os.Stderr, "Error: Aspect ratio must be between 1.0 and 4.0\n")
+		os.Exit(1)
+	}
+
+	// Validate max events
+	if *maxEvents < 1 || *maxEvents > 500 {
+		fmt.Fprintf(os.Stderr, "Error: Max events must be between 1 and 500\n")
+		os.Exit(1)
+	}
+
+	// Validate poll interval
+	if *pollInterval < 1*time.Second || *pollInterval > 300*time.Second {
+		fmt.Fprintf(os.Stderr, "Error: Poll interval must be between 1s and 300s\n")
 		os.Exit(1)
 	}
 
@@ -1673,29 +1668,16 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 	debugLog("Application starting up")
 
-	// Initialize GeoIP manager
-	geoIPManager := NewGeoIPManager()
-	defer func() {
-		if geoIPManager != nil {
-			geoIPManager.Close()
-		}
-	}()
-
-	// Try to load GeoIP database (silently disable if not found)
-	geoIPFile := "GeoLite2-City.mmdb"
-	if _, err := os.Stat(geoIPFile); err == nil {
-		if err := geoIPManager.LoadDatabase(geoIPFile); err != nil {
-			debugLog("GeoIP: Failed to load database: %v", err)
-			globalGeoIP = nil // Disable GeoIP functionality
-		} else {
-			debugLog("GeoIP: Database loaded successfully")
-			globalGeoIP = geoIPManager // Enable GeoIP functionality
-			globalGeoIPAvailable = true
-		}
-	} else {
-		debugLog("GeoIP: Database file not found, GeoIP functionality disabled")
-		globalGeoIP = nil // Disable GeoIP functionality
-	}
+	// Initialize API client configuration from command-line flags
+	apiConfig := createAPIConfig(*baseURL, *pollInterval, *maxEvents)
+	
+	apiClient := NewAPIClient(apiConfig)
+	
+	// Initialize GeoIP manager with API client
+	geoIPManager := NewGeoIPManager(apiClient)
+	globalGeoIP = geoIPManager
+	globalGeoIPAvailable = true
+	debugLog("Geocode API: Initialized with endpoint %s", apiConfig.BaseURL)
 
 	// Initialize TUI
 	tui, err := NewTUI(*aspectRatio)
@@ -1710,35 +1692,21 @@ func main() {
 	// Start event listener
 	quit := tui.pollEvents(*aspectRatio)
 
-	// Create a shared dashboard instance for both TUI and HPFeeds
+	// Create a shared dashboard instance for both TUI and API client
 	sharedDashboard := NewDashboard(tui.height - 4) // Reserve space for stats header and chart
 	tui.dashboard = sharedDashboard
 	debugLog("Created shared dashboard at pointer: %p", sharedDashboard)
 
-	// Try to load HPFeeds configuration and start client
-	config, err := readHPFeedsConfig("hpfeeds.conf")
+	// Start API client for live data
 	useLiveData := false
+	debugLog("API Client: Starting with config: %s", apiConfig.BaseURL)
+	debugLog("Dashboard pointer for API client: %p", sharedDashboard)
+	err = startAPIClient(apiClient, sharedDashboard)
 	if err != nil {
-		debugLog("HPFeeds config file not found: %v", err)
-		debugLog("Using default SecKC MHN public credentials")
-		// Use default SecKC MHN credentials
-		config = &HPFeedsConfig{
-			Ident:   "seckc-community",
-			Secret:  "fk6QgrnyvwbWSxCIwL5SIc2oARC4DXx46",
-			Server:  "mhn.h-i-r.net",
-			Port:    "10000",
-			Channel: "cowrie.sessions",
-		}
-	}
-
-	debugLog("HPFeeds config: server=%s:%s channel=%s ident=%s", config.Server, config.Port, config.Channel, config.Ident)
-	debugLog("Dashboard pointer for HPFeeds: %p", sharedDashboard)
-	err = startHPFeedsClient(config, sharedDashboard)
-	if err != nil {
-		debugLog("HPFeeds client connection failed: %v", err)
+		debugLog("API client connection failed: %v", err)
 	} else {
-		debugLog("HPFeeds client connected successfully")
-		globalHPFeedsConnected = true
+		debugLog("API client started successfully")
+		globalAPIConnected = true
 		useLiveData = true
 	}
 
@@ -1746,6 +1714,7 @@ func main() {
 	lastConnectionTime := time.Now()
 	lastGlobeUpdate := time.Now()
 	lastStatsUpdate := time.Now()
+	lastCacheStatsUpdate := time.Now()
 
 	// Random interval for mock data generation (0.2 to 5 seconds)
 	nextMockInterval := time.Duration(200+rand.Intn(4800)) * time.Millisecond
@@ -1797,6 +1766,15 @@ func main() {
 				}
 			}()
 			lastStatsUpdate = now
+		}
+
+		// Log geocoding cache statistics every 30 seconds
+		if debugLogger != nil && now.Sub(lastCacheStatsUpdate) >= 30*time.Second {
+			if globalGeoIP != nil {
+				cacheSize, maxCache := globalGeoIP.GetCacheStats()
+				debugLog("Geocode Cache: Current size %d/%d entries", cacheSize, maxCache)
+			}
+			lastCacheStatsUpdate = now
 		}
 
 		// Calculate rotation using configurable period

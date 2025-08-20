@@ -53,6 +53,10 @@ SecKC-MHN-Globe [OPTIONS]
  `-s <seconds>`  Globe rotation period in seconds (10-300, default: 30)   
  `-r <milliseconds>` Globe refresh rate in ms (50-1000, default: 100)  
  `-m`  Monochrome mode without fancy colors  
+ `-a <ratio>`  Character aspect ratio (height/width, 1.0-4.0, default: 2.0)  
+ `-u <url>`  Base URL for SecKC API (default: https://mhn.h-i-r.net/seckcapi)  
+ `-e <count>`  Maximum events to fetch per API call (1-500, default: 50)  
+ `-p <duration>`  API polling interval (1s-300s, default: 2s)  
 
 ### Controls
 
@@ -73,36 +77,14 @@ Press `Q`, `X`, `Space`, `Esc` or `Ctrl+C` to exit
 
 ## Configuration
 
-### HPFeeds Configuration (Optional)
-
-Create `hpfeeds.conf` in the application directory:
-
-```
-<ident> <secret> <server> <port> <channel>
-```
-
 **Example:**
-This program was made to interface with the Public SecKC Community HPFeeds stream that I maintain, which this project will try to use by default if no configuration file is provided:
-```
-seckc-community fk6QgrnyvwbWSxCIwL5SIc2oARC4DXx46 mhn.h-i-r.net 10000 cowrie.sessions
-```
-
-> **Note:** Mock data is automatically generated if HPFeeds is unconfigured or unavailable.
-
-### GeoIP Database (Optional)
-
-1. Register for free at [MaxMind GeoLite2](https://www.maxmind.com/en/geolite2/signup)
-2. Download `GeoLite2-City.mmdb`
-3. Place in the application directory
-
-> **Note:** Globe spins without location markers if GeoIP database is not available.
+This program was made to interface with the Public SecKC MHN Dashboard that I maintain, which this project will try to use by default if no configuration is provided.
 
 ## Dependencies
 
 ```go
 require (
     github.com/gdamore/tcell/v2 v2.8.1      // Terminal UI
-    github.com/oschwald/geoip2-golang v1.13.0 // GeoIP lookup
 )
 ```
 
@@ -114,12 +96,9 @@ This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICE
 
 ### Common Issues
 
-1. **No attack locations showing**: Check GeoIP database presence
-2. **HPFeeds connection fails**: Verify credentials in `hpfeeds.conf`
 3. **Terminal display issues**: Ensure terminal supports color and proper size
 4. **Performance problems**: Enable debug logging with `-d` option
 5. **Globe landmass seems "blocky"**: Reduce terminal size to below 190x70
-6. **Location points are wrong**: This is a mix of GeoIP data accuracy, the constrained resolution of the globe, the points intentionally kind of "hovering" over the surface of the globe, and me not caring enough to flawlessly align the attack layer and globe layer coordinate systems. Sorry.
 
 ### Debug Mode
 
