@@ -375,7 +375,6 @@ func (s *StatsManager) fetchFromURL(url, label string) (StatsResponse, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	// Read the entire response body for logging
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		debugLog("Stats: %s Failed to read response body: %v", label, err)
@@ -384,7 +383,6 @@ func (s *StatsManager) fetchFromURL(url, label string) (StatsResponse, error) {
 
 	debugLog("Stats: %s Complete API response body: %s", label, string(body))
 
-	// Parse the JSON response
 	var stats StatsResponse
 	if err := json.Unmarshal(body, &stats); err != nil {
 		debugLog("Stats: %s JSON parsing failed: %v", label, err)
@@ -393,7 +391,6 @@ func (s *StatsManager) fetchFromURL(url, label string) (StatsResponse, error) {
 
 	debugLog("Stats: %s Fetched data successfully, %d entries", label, len(stats))
 
-	// Log the parsed hourly data points
 	if len(stats) > 0 {
 		debugLog("Stats: %s Date: %s, Channel: %s", label, stats[0].Date, stats[0].Channel)
 		debugLog("Stats: %s Hourly data points:", label)
@@ -406,7 +403,6 @@ func (s *StatsManager) fetchFromURL(url, label string) (StatsResponse, error) {
 			}
 		}
 
-		// Calculate and log statistics
 		totalAttacks := 0
 		maxHour := 0
 		maxCount := 0
@@ -617,6 +613,7 @@ func (s *StatsManager) RenderBarGraph(width int) []string {
 var globalGeoIP *GeoIPManager
 var globalAPIConnected bool
 var globalGeoIPAvailable bool
+var lastProcessedEventTime float64 // Track last processed event timestamp to avoid duplicates
 
 type TUI struct {
 	screen       tcell.Screen
@@ -1103,6 +1100,16 @@ func startAPIClient(apiClient *APIClient, dashboard *Dashboard) error {
 				debugLog("API Client: Retrieved %d events", len(events))
 
 				for _, apiEvent := range events {
+					// Skip events we've already processed based on timestamp
+					if apiEvent.Timestamp <= lastProcessedEventTime {
+						continue
+					}
+					
+					// Update last processed timestamp
+					if apiEvent.Timestamp > lastProcessedEventTime {
+						lastProcessedEventTime = apiEvent.Timestamp
+					}
+					
 					// Process each event
 					eventData := apiEvent.Event
 
@@ -1330,14 +1337,9 @@ func (g *Globe) sampleEarthAt(lat, lon float64) rune {
 
 func (g *Globe) project3DTo2D(lat, lon, rotation float64) (int, int, bool) {
 	// Invert longitude and add offset to align coordinate system
-	adjustedLon := -lon + 90  // Increase offset to move Florida westward from Atlantic toward correct position
-	// Wrap longitude to -180..180 range
-	for adjustedLon < -180 {
-		adjustedLon += 360
-	}
-	for adjustedLon > 180 {
-		adjustedLon -= 360
-	}
+	adjustedLon := -lon + 90  
+	// Wrap longitude to -180..180 range using modulo arithmetic
+	adjustedLon = math.Mod(adjustedLon + 180, 360) - 180
 	// Convert lat/lon to 3D coordinates
 	latRad := lat * math.Pi / 180
 	lonRad := (adjustedLon + rotation*180/math.Pi) * math.Pi / 180
