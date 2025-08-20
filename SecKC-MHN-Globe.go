@@ -515,7 +515,6 @@ type TUI struct {
 	globeChanged bool
 	dashChanged  bool
 	statsChanged bool
-	aspectRatio  float64
 	mutex        sync.RWMutex
 }
 
@@ -788,7 +787,6 @@ func NewTUI(aspectRatio float64) (*TUI, error) {
 		globeChanged: true,
 		dashChanged:  true,
 		statsChanged: true,
-		aspectRatio:  aspectRatio,
 	}
 
 	// Dashboard is fixed at exactly 45 characters wide. This was chosen as it leaves an
@@ -817,7 +815,7 @@ func (tui *TUI) Close() {
 	}
 }
 
-func (tui *TUI) HandleResize() {
+func (tui *TUI) HandleResize(aspectRatio float64) {
 	tui.mutex.Lock()
 	defer tui.mutex.Unlock()
 
@@ -833,7 +831,7 @@ func (tui *TUI) HandleResize() {
 		globeWidth = 10
 	}
 
-	tui.globe = NewGlobe(globeWidth, tui.height, tui.aspectRatio)
+	tui.globe = NewGlobe(globeWidth, tui.height, aspectRatio)
 
 	// Update dashboard MaxLines without creating a new instance (preserve shared reference)
 	// Reserve 4 lines for stats header and chart at bottom
@@ -1536,7 +1534,7 @@ func (g *Globe) render(rotation float64) [][]rune {
 	return screen
 }
 
-func (tui *TUI) pollEvents() chan bool {
+func (tui *TUI) pollEvents(aspectRatio float64) chan bool {
 	quit := make(chan bool, 1)
 	go func() {
 		for {
@@ -1563,7 +1561,7 @@ func (tui *TUI) pollEvents() chan bool {
 				}
 			case *tcell.EventResize:
 				debugLog("TUI: Resize event detected")
-				tui.HandleResize()
+				tui.HandleResize(aspectRatio)
 			}
 		}
 	}()
@@ -1710,7 +1708,7 @@ func main() {
 	globalTUI = tui // Set global reference for dashboard updates
 
 	// Start event listener
-	quit := tui.pollEvents()
+	quit := tui.pollEvents(*aspectRatio)
 
 	// Create a shared dashboard instance for both TUI and HPFeeds
 	sharedDashboard := NewDashboard(tui.height - 4) // Reserve space for stats header and chart
