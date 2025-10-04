@@ -8,8 +8,10 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +30,11 @@ type Connection struct {
 	Password string
 	Protocol string
 	Time     time.Time
+	City     string // City name
+	Country  string // Country code
+	ASN      string // Autonomous System Number
+	Org      string // Organization/ISP
+	RDNS     string // Reverse DNS
 }
 
 type APIConfig struct {
@@ -74,6 +81,9 @@ type LocationInfo struct {
 	Country   string
 	Latitude  float64
 	Longitude float64
+	ASN       string // Autonomous System Number
+	Org       string // Organization/ISP name
+	RDNS      string // Reverse DNS
 	Valid     bool
 }
 
@@ -255,6 +265,40 @@ var themes = map[string]*Theme{
 		ArcTrail:      tcell.ColorWhite,
 		RainEffect:    tcell.ColorWhite,
 		ScanlineShade: 0.5,
+	},
+	"rainbow": {
+		Name:          "rainbow",
+		Background:    tcell.ColorBlack,
+		Text:          tcell.NewRGBColor(255, 255, 255),
+		Globe:         tcell.NewRGBColor(255, 0, 0), // Base color (will be rainbow pattern)
+		GlobeShaded:   tcell.NewRGBColor(128, 0, 0),
+		Attack:        tcell.NewRGBColor(255, 255, 255),
+		AttackGlyph:   tcell.NewRGBColor(255, 255, 100),
+		Dashboard:     tcell.NewRGBColor(138, 43, 226),
+		Stats:         tcell.NewRGBColor(0, 191, 255),
+		Separator:     tcell.NewRGBColor(128, 128, 128),
+		StatusOk:      tcell.NewRGBColor(0, 255, 0),
+		StatusError:   tcell.NewRGBColor(255, 0, 0),
+		ArcTrail:      tcell.NewRGBColor(255, 165, 0),
+		RainEffect:    tcell.NewRGBColor(0, 255, 255),
+		ScanlineShade: 0.7,
+	},
+	"skittles": {
+		Name:          "skittles",
+		Background:    tcell.ColorBlack,
+		Text:          tcell.NewRGBColor(255, 255, 255),
+		Globe:         tcell.NewRGBColor(255, 0, 0), // Base color (will be randomized per character)
+		GlobeShaded:   tcell.NewRGBColor(128, 0, 0),
+		Attack:        tcell.NewRGBColor(255, 255, 0),
+		AttackGlyph:   tcell.NewRGBColor(255, 200, 0),
+		Dashboard:     tcell.NewRGBColor(138, 43, 226),
+		Stats:         tcell.NewRGBColor(0, 191, 255),
+		Separator:     tcell.NewRGBColor(128, 128, 128),
+		StatusOk:      tcell.NewRGBColor(0, 255, 0),
+		StatusError:   tcell.NewRGBColor(255, 0, 0),
+		ArcTrail:      tcell.NewRGBColor(255, 165, 0),
+		RainEffect:    tcell.NewRGBColor(0, 255, 255),
+		ScanlineShade: 0.7,
 	},
 }
 
@@ -896,13 +940,19 @@ func (crt *CRTEffect) Update() {
 // ============================================================================
 
 type TUIState struct {
-	paused       bool
-	spinSpeed    float64
-	showHelp     bool
-	showGrid     bool
-	showArcs     bool
-	currentTheme int
-	mutex        sync.RWMutex
+	paused          bool
+	spinSpeed       float64
+	showHelp        bool
+	showGrid        bool
+	showArcs        bool
+	showInfo        bool   // Show detailed info panel
+	showStats       bool   // Show top attackers stats
+	showTopIPs      bool   // Show top IP addresses panel
+	showCommands    bool   // Show command guide
+	savedArcStyle   string // Remember the arc style when toggling
+	currentTheme    int
+	dashboardScroll int    // Horizontal scroll offset for dashboard
+	mutex           sync.RWMutex
 }
 
 func NewTUIState() *TUIState {
@@ -1195,13 +1245,95 @@ func (g *GeoIPManager) fetchFromAPI(ipStr string) LocationInfo {
 		return LocationInfo{Valid: false}
 	}
 
+	// Skip ASN/rDNS lookups in demo mode for performance
+	var asn, org, rdns string
+	if globalDemoStorm == nil || !globalDemoStorm.enabled {
+		// Only fetch ASN/rDNS for real (non-demo) traffic
+		asn, org = g.lookupASN(ipStr)
+		rdns = g.lookupReverseDNS(ipStr)
+	}
+
 	return LocationInfo{
 		City:      geocodeResp.City.Names["en"],
 		Country:   geocodeResp.Country.Names["en"],
 		Latitude:  geocodeResp.Location.Latitude,
 		Longitude: geocodeResp.Location.Longitude,
+		ASN:       asn,
+		Org:       org,
+		RDNS:      rdns,
 		Valid:     true,
 	}
+}
+
+func (g *GeoIPManager) lookupASN(ipStr string) (string, string) {
+	// Try to fetch ASN info from ipinfo.io API (free tier allows limited requests)
+	url := fmt.Sprintf("https://ipinfo.io/%s/json", ipStr)
+
+	client := &http.Client{Timeout: 2 * time.Second} // Increased timeout
+	resp, err := client.Get(url)
+	if err != nil {
+		debugLog("ASN Lookup: Failed for %s: %v", ipStr, err)
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		debugLog("ASN Lookup: HTTP %d for %s", resp.StatusCode, ipStr)
+		return "", ""
+	}
+
+	var result struct {
+		Org string `json:"org"` // Format: "AS15169 Google LLC"
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		debugLog("ASN Lookup: Decode error for %s: %v", ipStr, err)
+		return "", ""
+	}
+
+	// Parse "AS15169 Google LLC" into ASN and Org
+	if result.Org != "" {
+		debugLog("ASN Lookup: Success for %s: %s", ipStr, result.Org)
+		parts := strings.SplitN(result.Org, " ", 2)
+		if len(parts) == 2 {
+			return parts[0], parts[1] // "AS15169", "Google LLC"
+		}
+		return "", result.Org
+	}
+
+	return "", ""
+}
+
+func (g *GeoIPManager) lookupReverseDNS(ipStr string) string {
+	// Perform reverse DNS lookup with timeout
+	// Use goroutine with timeout to prevent blocking
+	resultChan := make(chan []string, 1)
+
+	go func() {
+		names, err := net.LookupAddr(ipStr)
+		if err == nil && len(names) > 0 {
+			debugLog("rDNS Lookup: Success for %s: %s", ipStr, names[0])
+			resultChan <- names
+		} else {
+			debugLog("rDNS Lookup: Failed for %s: %v", ipStr, err)
+			resultChan <- nil
+		}
+	}()
+
+	// Wait up to 1 second for result (increased from 300ms)
+	select {
+	case names := <-resultChan:
+		if names != nil && len(names) > 0 {
+			// Return the first reverse DNS name, remove trailing dot
+			rdns := strings.TrimSuffix(names[0], ".")
+			debugLog("rDNS Lookup: Returning %s for %s", rdns, ipStr)
+			return rdns
+		}
+	case <-time.After(1000 * time.Millisecond):
+		debugLog("rDNS Lookup: Timeout for %s", ipStr)
+	}
+
+	return ""
 }
 
 func (g *GeoIPManager) addToCache(ipStr string, location LocationInfo) {
@@ -1490,6 +1622,7 @@ func (d *Dashboard) AddConnection(ip, username, password, protocol string) {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
 
+	// Create connection with basic info first (fast)
 	connection := Connection{
 		IP:       ip,
 		Username: username,
@@ -1498,18 +1631,26 @@ func (d *Dashboard) AddConnection(ip, username, password, protocol string) {
 		Time:     time.Now(),
 	}
 
+	// Lookup geolocation for arc rendering (fast, cached)
+	if globalGeoIP != nil {
+		loc := globalGeoIP.LookupIP(ip)
+		if loc.Valid {
+			connection.City = loc.City
+			connection.Country = loc.Country
+			connection.ASN = loc.ASN
+			connection.Org = loc.Org
+			connection.RDNS = loc.RDNS
+			// Add to arc manager if enabled
+			if globalArcManager != nil {
+				globalArcManager.AddArc(loc.Latitude, loc.Longitude, protocol)
+			}
+		}
+	}
+
 	d.Connections = append(d.Connections, connection)
 
 	if len(d.Connections) > d.MaxLines {
 		d.Connections = d.Connections[len(d.Connections)-d.MaxLines:]
-	}
-
-	// Add to arc manager if enabled
-	if globalArcManager != nil && globalGeoIP != nil {
-		loc := globalGeoIP.LookupIP(ip)
-		if loc.Valid {
-			globalArcManager.AddArc(loc.Latitude, loc.Longitude, protocol)
-		}
 	}
 
 	if globalTUI != nil {
@@ -1522,50 +1663,78 @@ func (d *Dashboard) GenerateRandomConnection() {
 	username := generateRandomUsername()
 	password := generateRandomPassword()
 	protocol := randomProtocol()
+
+	// Add with basic info - geolocation will be looked up in AddConnection
 	d.AddConnection(ip, username, password, protocol)
 }
 
-func (d *Dashboard) Render(height int) []string {
+func (d *Dashboard) Render(height int, width int) []string {
 	d.mutex.RLock()
 	defer d.mutex.RUnlock()
 
 	lines := make([]string, height)
 
-	apiStatus := "!"
-	if globalAPIConnected {
-		apiStatus = "+"
-	}
-	geoipStatus := "!"
-	if globalGeoIPAvailable {
-		geoipStatus = "+"
-	}
-	headerLine := fmt.Sprintf("SecKC MHN TUI | API [%s]  GeoCode [%s]", apiStatus, geoipStatus)
-	if len(headerLine) > 45 {
-		headerLine = headerLine[:45]
+	// Single header line with all fields
+	headerLine := "IP              [CC] City         Prot User:Pass  Time  ASN / Org / rDNS"
+	if len(headerLine) > width {
+		headerLine = headerLine[:width]
 	}
 	lines[0] = headerLine
-	lines[1] = strings.Repeat("-", 45)
+	lines[1] = strings.Repeat("-", width)
 
 	startLine := 2
 	for i, conn := range d.Connections {
-		if startLine+i >= height-1 {
+		lineIdx := startLine + i // Single line per connection
+		if lineIdx >= height {
 			break
 		}
 
-		ipPart := fmt.Sprintf("%15s", conn.IP)
+		// Extract country code
+		countryCode := ""
+		if conn.Country != "" {
+			parts := strings.Fields(conn.Country)
+			if len(parts) > 0 {
+				countryCode = "[" + parts[0][:min(2, len(parts[0]))] + "]"
+			}
+		}
+
+		// City (no truncation - show full city name)
+		city := conn.City
+		if city == "" {
+			city = "Unknown"
+		}
+
+		// Protocol (4 chars)
+		proto := conn.Protocol
+		if len(proto) > 4 {
+			proto = proto[:4]
+		}
+
+		// Credentials (no truncation - show full username:password)
 		credPart := fmt.Sprintf("%s:%s", conn.Username, conn.Password)
 
-		if len(credPart) > 27 {
-			credPart = credPart[:27]
+		// Time (HH:MM)
+		timeStr := conn.Time.Format("15:04")
+
+		// ASN/Org or rDNS info (use all remaining width)
+		var enrichInfo string
+		if conn.Org != "" {
+			enrichInfo = fmt.Sprintf("%s %s", conn.ASN, conn.Org)
+		} else if conn.RDNS != "" {
+			enrichInfo = conn.RDNS
+		} else {
+			enrichInfo = "..."
 		}
 
-		line := fmt.Sprintf("%s - %s", ipPart, credPart)
+		// Format: IP [CC] City Proto User:Pass Time ASN/Org/rDNS (all on one line)
+		line := fmt.Sprintf("%-15s %s %-12s %-4s %-10s %-5s %s",
+			conn.IP, countryCode, city, proto, credPart, timeStr, enrichInfo)
 
-		if len(line) > 45 {
-			line = line[:45]
+		// Only truncate if line is significantly longer than width (allows some overflow)
+		if len(line) > width+10 {
+			line = line[:width-1] + "»" // Use » to indicate more text
 		}
-
-		lines[startLine+i] = line
+		lines[lineIdx] = line
 	}
 
 	for i := startLine + len(d.Connections); i < height; i++ {
@@ -1722,9 +1891,16 @@ func NewTUI(aspectRatio float64, charset Charset, recordPath string) (*TUI, erro
 		statsChanged: true,
 	}
 
-	dashboardWidth := 45
-	globeWidth := width - dashboardWidth - 3
+	// Dynamic dashboard width: 50% of terminal, minimum 45, maximum 80
+	dashboardWidth := width / 2
+	if dashboardWidth < 45 {
+		dashboardWidth = 45
+	}
+	if dashboardWidth > 80 {
+		dashboardWidth = 80
+	}
 
+	globeWidth := width - dashboardWidth - 3
 	if globeWidth < 10 {
 		globeWidth = 10
 	}
@@ -1746,24 +1922,78 @@ func (tui *TUI) Close() {
 }
 
 func (tui *TUI) HandleResize(aspectRatio float64) {
+	// Get new size first (no lock needed for screen operations)
+	newWidth, newHeight := tui.screen.Size()
+
 	tui.mutex.Lock()
-	defer tui.mutex.Unlock()
+	tui.width = newWidth
+	tui.height = newHeight
+	tui.mutex.Unlock()
 
-	tui.width, tui.height = tui.screen.Size()
-
-	dashboardWidth := 45
-	globeWidth := tui.width - dashboardWidth - 3
-
-	if globeWidth < 10 {
-		globeWidth = 10
+	// Minimum size check
+	if newWidth < 60 || newHeight < 20 {
+		tui.screen.Clear()
+		tui.screen.Show()
+		return
 	}
 
-	charset := tui.globe.Charset
-	tui.globe = NewGlobe(globeWidth, tui.height, aspectRatio, charset)
+	// Calculate globe width - globe gets more space to expand
+	// Globe takes 60% of width, dashboard gets 40%
+	globeWidth := (newWidth * 60) / 100
+	if globeWidth < 60 {
+		globeWidth = 60
+	}
+	if globeWidth > 200 {
+		globeWidth = 200
+	}
 
+	// Preserve and recreate globe
+	tui.mutex.Lock()
+	if tui.globe != nil {
+		charset := tui.globe.Charset
+		lighting := tui.globe.Lighting
+		lightLon := tui.globe.LightLon
+		lightLat := tui.globe.LightLat
+		lightFollow := tui.globe.LightFollow
+		zoom := tui.globe.Zoom
+		nudgeX := tui.globe.NudgeX
+		nudgeY := tui.globe.NudgeY
+
+		tui.globe = NewGlobe(globeWidth, newHeight, aspectRatio, charset)
+		tui.globe.Lighting = lighting
+		tui.globe.LightLon = lightLon
+		tui.globe.LightLat = lightLat
+		tui.globe.LightFollow = lightFollow
+		tui.globe.Zoom = zoom
+		tui.globe.NudgeX = nudgeX
+		tui.globe.NudgeY = nudgeY
+	}
+
+	// Recreate rain
+	if tui.rain != nil {
+		rainEnabled := tui.rain.enabled
+		rainDensity := tui.rain.density
+		tui.rain = NewMatrixRain(newWidth, newHeight, rainDensity)
+		tui.rain.enabled = rainEnabled
+	}
+
+	// Recreate CRT
+	if tui.crt != nil {
+		crtEnabled := tui.crt.enabled
+		glowLevel := tui.crt.glowLevel
+		tui.crt = NewCRTEffect(newWidth, newHeight)
+		tui.crt.enabled = crtEnabled
+		tui.crt.glowLevel = glowLevel
+	}
+	tui.mutex.Unlock()
+
+	// Update dashboard
 	if tui.dashboard != nil {
 		tui.dashboard.mutex.Lock()
-		newMaxLines := tui.height - 4
+		newMaxLines := newHeight - 4
+		if newMaxLines < 1 {
+			newMaxLines = 1
+		}
 		tui.dashboard.MaxLines = newMaxLines
 		if len(tui.dashboard.Connections) > newMaxLines {
 			tui.dashboard.Connections = tui.dashboard.Connections[len(tui.dashboard.Connections)-newMaxLines:]
@@ -1771,10 +2001,12 @@ func (tui *TUI) HandleResize(aspectRatio float64) {
 		tui.dashboard.mutex.Unlock()
 	}
 
-	tui.globeChanged = true
-	tui.dashChanged = true
-	tui.statsChanged = true
+	// Clear and mark for redraw
 	tui.screen.Clear()
+	tui.MarkGlobeChanged()
+	tui.MarkDashboardChanged()
+	tui.MarkStatsChanged()
+	tui.screen.Show()
 }
 
 func (tui *TUI) MarkGlobeChanged() {
@@ -1796,11 +2028,20 @@ func (tui *TUI) MarkStatsChanged() {
 }
 
 func (tui *TUI) drawText(x, y int, text string, style tcell.Style) {
+	// Bounds check
+	if y < 0 || y >= tui.height || x >= tui.width {
+		return
+	}
+
 	for i, r := range []rune(text) {
-		if x+i >= tui.width {
-			break
+		if x+i < 0 {
+			continue
 		}
-		tui.screen.SetContent(x+i, y, r, nil, style)
+		// Don't break at screen width - let tcell handle it
+		// This allows text to extend beyond the terminal if needed
+		if x+i < tui.width {
+			tui.screen.SetContent(x+i, y, r, nil, style)
+		}
 	}
 }
 
@@ -1843,9 +2084,22 @@ func (tui *TUI) renderGlobe(rotation float64, protocolGlyphs bool) {
 	attackStyle := tcell.StyleDefault.Foreground(currentTheme.Attack).Bold(true)
 	glyphStyle := tcell.StyleDefault.Foreground(currentTheme.AttackGlyph).Bold(true)
 
-	// Clear globe area
-	for y := 0; y < tui.globe.Height; y++ {
-		for x := 0; x < tui.globe.Width; x++ {
+	// Rainbow and Skittles modes: colorful globe characters
+	rainbowMode := currentTheme.Name == "rainbow"
+	skittlesMode := currentTheme.Name == "skittles"
+	rainbowColors := []tcell.Color{
+		tcell.NewRGBColor(255, 0, 0),     // Red
+		tcell.NewRGBColor(255, 127, 0),   // Orange
+		tcell.NewRGBColor(255, 255, 0),   // Yellow
+		tcell.NewRGBColor(0, 255, 0),     // Green
+		tcell.NewRGBColor(0, 0, 255),     // Blue
+		tcell.NewRGBColor(75, 0, 130),    // Indigo
+		tcell.NewRGBColor(148, 0, 211),   // Violet
+	}
+
+	// Clear globe area with bounds checking
+	for y := 0; y < tui.globe.Height && y < tui.height; y++ {
+		for x := 0; x < tui.globe.Width && x < tui.width; x++ {
 			tui.screen.SetContent(x, y, ' ', nil, tcell.StyleDefault)
 		}
 	}
@@ -1854,7 +2108,8 @@ func (tui *TUI) renderGlobe(rotation float64, protocolGlyphs bool) {
 	if tui.rain != nil && tui.rain.enabled {
 		tui.rain.mutex.RLock()
 		for _, col := range tui.rain.columns {
-			if col.X < tui.globe.Width && col.Y >= 0 && col.Y < tui.globe.Height {
+			if col.X >= 0 && col.X < tui.globe.Width && col.X < tui.width &&
+			   col.Y >= 0 && col.Y < tui.globe.Height && col.Y < tui.height {
 				rainStyle := tcell.StyleDefault.Foreground(currentTheme.RainEffect)
 				tui.screen.SetContent(col.X, col.Y, '|', nil, rainStyle)
 			}
@@ -1862,18 +2117,30 @@ func (tui *TUI) renderGlobe(rotation float64, protocolGlyphs bool) {
 		tui.rain.mutex.RUnlock()
 	}
 
-	// Draw globe
-	for y := 0; y < len(globeScreen) && y < tui.height; y++ {
-		for x := 0; x < len(globeScreen[y]) && x < tui.globe.Width; x++ {
+	// Draw globe with strict bounds checking
+	for y := 0; y < len(globeScreen) && y < tui.height && y < tui.globe.Height; y++ {
+		for x := 0; x < len(globeScreen[y]) && x < tui.globe.Width && x < tui.width; x++ {
 			char := globeScreen[y][x]
 			if char != ' ' {
 				style := landStyle
 
-				// Protocol glyphs
-				if protocolGlyphs && (char == '#' || char == '~' || char == '@' || char == ':' || char == '%' || char == '!') {
+				// Check for attacks and protocol glyphs first
+				isAttack := (char == '*' || char == '·')
+				isGlyph := protocolGlyphs && (char == '#' || char == '~' || char == '@' || char == ':' || char == '%' || char == '!')
+
+				if isGlyph {
 					style = glyphStyle
-				} else if char == '*' || char == '·' {
+				} else if isAttack {
 					style = attackStyle
+				} else if rainbowMode {
+					// Rainbow mode: solid rainbow pattern (diagonal stripes)
+					colorIdx := (x + y) % len(rainbowColors)
+					style = tcell.StyleDefault.Foreground(rainbowColors[colorIdx])
+				} else if skittlesMode {
+					// Skittles mode: randomized rainbow colors for each character
+					// Use position as seed for pseudo-random but consistent colors per position
+					colorIdx := ((x * 73) + (y * 37)) % len(rainbowColors)
+					style = tcell.StyleDefault.Foreground(rainbowColors[colorIdx])
 				}
 
 				// CRT scanline effect
@@ -1905,10 +2172,17 @@ func (tui *TUI) renderDashboard() {
 	}
 
 	dashboardHeight := tui.height - 4
-	dashLines := tui.dashboard.Render(dashboardHeight)
+
+	// Dynamic dashboard width: use remaining space after globe
+	dashboardWidth := tui.width - tui.globe.Width - 3 // 3 for separator and padding
+	if dashboardWidth < 50 {
+		dashboardWidth = 50
+	}
+	// No maximum limit - use all available space
+
+	dashLines := tui.dashboard.Render(dashboardHeight, dashboardWidth)
 	separatorX := tui.globe.Width + 1
 	startX := separatorX + 2
-	dashboardWidth := 45
 
 	for y := 0; y < dashboardHeight; y++ {
 		tui.screen.SetContent(separatorX, y, ' ', nil, tcell.StyleDefault)
@@ -1927,14 +2201,52 @@ func (tui *TUI) renderDashboard() {
 	statusOkStyle := tcell.StyleDefault.Foreground(currentTheme.StatusOk).Bold(true)
 	statusErrorStyle := tcell.StyleDefault.Foreground(currentTheme.StatusError).Bold(true)
 
+	// Get scroll offset
+	tui.state.mutex.RLock()
+	scrollOffset := tui.state.dashboardScroll
+	tui.state.mutex.RUnlock()
+
 	for y, line := range dashLines {
 		if y >= dashboardHeight {
 			break
 		}
 
-		if len(line) > dashboardWidth {
-			line = line[:dashboardWidth]
+		// Apply horizontal scroll - slice the line based on scroll offset
+		lineRunes := []rune(line)
+		visibleLine := ""
+		scrollIndicatorLeft := ""
+		scrollIndicatorRight := ""
+
+		if len(lineRunes) > 0 {
+			// Add left scroll indicator if scrolled right
+			if scrollOffset > 0 {
+				scrollIndicatorLeft = "◀"
+			}
+
+			// Calculate visible portion
+			startIdx := scrollOffset
+			endIdx := scrollOffset + dashboardWidth - 2 // -2 for scroll indicators
+
+			if startIdx >= len(lineRunes) {
+				startIdx = len(lineRunes) - 1
+				if startIdx < 0 {
+					startIdx = 0
+				}
+			}
+			if endIdx > len(lineRunes) {
+				endIdx = len(lineRunes)
+			}
+			if startIdx < len(lineRunes) {
+				visibleLine = string(lineRunes[startIdx:endIdx])
+			}
+
+			// Add right scroll indicator if there's more content
+			if endIdx < len(lineRunes) {
+				scrollIndicatorRight = "▶"
+			}
 		}
+
+		line = scrollIndicatorLeft + visibleLine + scrollIndicatorRight
 
 		style := connectionStyle
 		if y <= 1 {
@@ -1972,7 +2284,13 @@ func (tui *TUI) renderDashboard() {
 
 	headerY := dashboardHeight
 	if headerY < tui.height {
-		headerText := "-=-=-=-=- [ HOURLY ATTACK STATS ] -=-=-=-=-"
+		// Clear the line first
+		blankStyle := tcell.StyleDefault.Background(currentTheme.Background)
+		for x := startX; x < startX+dashboardWidth && x < tui.width; x++ {
+			tui.screen.SetContent(x, headerY, ' ', nil, blankStyle)
+		}
+
+		headerText := "[ HOURLY ATTACK STATS ]"
 		headerStyle := tcell.StyleDefault.Foreground(currentTheme.Dashboard).Bold(true)
 		if len(headerText) <= dashboardWidth {
 			padding := (dashboardWidth - len(headerText)) / 2
@@ -2041,6 +2359,238 @@ func (tui *TUI) renderStats() {
 	tui.mutex.Unlock()
 }
 
+func (tui *TUI) renderInfoPanel() {
+	if !tui.state.showInfo {
+		return
+	}
+
+	// Get most recent connection
+	var conn *Connection
+	if tui.dashboard != nil {
+		tui.dashboard.mutex.RLock()
+		if len(tui.dashboard.Connections) > 0 {
+			conn = &tui.dashboard.Connections[len(tui.dashboard.Connections)-1]
+		}
+		tui.dashboard.mutex.RUnlock()
+	}
+
+	if conn == nil {
+		return
+	}
+
+	infoText := []string{
+		"╔═══════════════ ATTACK DETAILS ═══════════════╗",
+		fmt.Sprintf("║ IP:         %-32s ║", conn.IP),
+		fmt.Sprintf("║ City:       %-32s ║", truncateString(conn.City, 32)),
+		fmt.Sprintf("║ Country:    %-32s ║", truncateString(conn.Country, 32)),
+		fmt.Sprintf("║ ASN:        %-32s ║", truncateString(conn.ASN, 32)),
+		fmt.Sprintf("║ Org:        %-32s ║", truncateString(conn.Org, 32)),
+		fmt.Sprintf("║ rDNS:       %-32s ║", truncateString(conn.RDNS, 32)),
+		fmt.Sprintf("║ Protocol:   %-32s ║", truncateString(conn.Protocol, 32)),
+		fmt.Sprintf("║ User:Pass:  %-32s ║", truncateString(conn.Username+":"+conn.Password, 32)),
+		fmt.Sprintf("║ Time:       %-32s ║", conn.Time.Format("2006-01-02 15:04:05")),
+		"╠═══════════════════════════════════════════════╣",
+		"║ Press I to close                              ║",
+		"╚═══════════════════════════════════════════════╝",
+	}
+
+	startY := (tui.height - len(infoText)) / 2
+	startX := (tui.width - len(infoText[0])) / 2
+
+	panelStyle := tcell.StyleDefault.Foreground(currentTheme.Attack).Background(currentTheme.Background).Bold(true)
+
+	for i, line := range infoText {
+		y := startY + i
+		if y >= 0 && y < tui.height {
+			tui.drawText(startX, y, line, panelStyle)
+		}
+	}
+}
+
+func truncateString(s string, maxLen int) string {
+	if s == "" {
+		return "N/A"
+	}
+	if len(s) > maxLen {
+		return s[:maxLen-3] + "..."
+	}
+	return s
+}
+
+func (tui *TUI) renderStatsPanel() {
+	if !tui.state.showStats {
+		return
+	}
+
+	// Aggregate stats from dashboard connections
+	countryCount := make(map[string]int)
+	asnCount := make(map[string]int)
+
+	if tui.dashboard != nil {
+		tui.dashboard.mutex.RLock()
+		for _, conn := range tui.dashboard.Connections {
+			if conn.Country != "" {
+				countryCount[conn.Country]++
+			}
+			if conn.ASN != "" {
+				asnCount[conn.ASN]++
+			}
+		}
+		tui.dashboard.mutex.RUnlock()
+	}
+
+	// Get top 5 countries
+	type statEntry struct {
+		name  string
+		count int
+	}
+	var topCountries []statEntry
+	for country, count := range countryCount {
+		topCountries = append(topCountries, statEntry{country, count})
+	}
+	// Simple bubble sort for top 5
+	for i := 0; i < len(topCountries); i++ {
+		for j := i + 1; j < len(topCountries); j++ {
+			if topCountries[j].count > topCountries[i].count {
+				topCountries[i], topCountries[j] = topCountries[j], topCountries[i]
+			}
+		}
+	}
+	if len(topCountries) > 5 {
+		topCountries = topCountries[:5]
+	}
+
+	// Get top 5 ASNs
+	var topASNs []statEntry
+	for asn, count := range asnCount {
+		topASNs = append(topASNs, statEntry{asn, count})
+	}
+	for i := 0; i < len(topASNs); i++ {
+		for j := i + 1; j < len(topASNs); j++ {
+			if topASNs[j].count > topASNs[i].count {
+				topASNs[i], topASNs[j] = topASNs[j], topASNs[i]
+			}
+		}
+	}
+	if len(topASNs) > 5 {
+		topASNs = topASNs[:5]
+	}
+
+	statsText := []string{
+		"╔═══════ TOP ATTACKERS ═══════╗",
+		"║ TOP COUNTRIES               ║",
+	}
+
+	for i, entry := range topCountries {
+		line := fmt.Sprintf("║ %d. %-18s %4d ║", i+1, truncateString(entry.name, 18), entry.count)
+		statsText = append(statsText, line)
+	}
+
+	statsText = append(statsText, "║                             ║")
+	statsText = append(statsText, "║ TOP ASNs                    ║")
+
+	for i, entry := range topASNs {
+		line := fmt.Sprintf("║ %d. %-18s %4d ║", i+1, truncateString(entry.name, 18), entry.count)
+		statsText = append(statsText, line)
+	}
+
+	statsText = append(statsText, "╠═════════════════════════════╣")
+	statsText = append(statsText, "║ Press S to close            ║")
+	statsText = append(statsText, "╚═════════════════════════════╝")
+
+	startY := 2
+	startX := tui.width - 33
+
+	statsStyle := tcell.StyleDefault.Foreground(currentTheme.Stats).Background(currentTheme.Background)
+
+	for i, line := range statsText {
+		y := startY + i
+		if y >= 0 && y < tui.height && startX >= 0 {
+			tui.drawText(startX, y, line, statsStyle)
+		}
+	}
+}
+
+func (tui *TUI) renderTopIPsPanel() {
+	if !tui.state.showTopIPs {
+		return
+	}
+
+	// Aggregate IP addresses from dashboard connections
+	ipCount := make(map[string]int)
+	ipDetails := make(map[string]*Connection)
+
+	if tui.dashboard != nil {
+		tui.dashboard.mutex.RLock()
+		for _, conn := range tui.dashboard.Connections {
+			if conn.IP != "" {
+				ipCount[conn.IP]++
+				if _, exists := ipDetails[conn.IP]; !exists {
+					connCopy := conn
+					ipDetails[conn.IP] = &connCopy
+				}
+			}
+		}
+		tui.dashboard.mutex.RUnlock()
+	}
+
+	// Sort by count
+	type ipEntry struct {
+		ip    string
+		count int
+		conn  *Connection
+	}
+	var entries []ipEntry
+	for ip, count := range ipCount {
+		entries = append(entries, ipEntry{ip: ip, count: count, conn: ipDetails[ip]})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].count > entries[j].count
+	})
+
+	// Take top 10
+	if len(entries) > 10 {
+		entries = entries[:10]
+	}
+
+	// Build panel
+	ipsText := []string{
+		"╔═══════════════════════════════════════════════╗",
+		"║          TOP ATTACKING IP ADDRESSES          ║",
+		"╠═══════════════════════════════════════════════╣",
+	}
+
+	for i, entry := range entries {
+		org := "Unknown"
+		if entry.conn != nil && entry.conn.Org != "" {
+			org = truncateString(entry.conn.Org, 20)
+		}
+		line := fmt.Sprintf("║ %2d. %-15s x%-4d %-20s ║", i+1, entry.ip, entry.count, org)
+		ipsText = append(ipsText, line)
+	}
+
+	// Padding
+	for len(ipsText) < 15 {
+		ipsText = append(ipsText, "║                                               ║")
+	}
+
+	ipsText = append(ipsText, "╠═══════════════════════════════════════════════╣")
+	ipsText = append(ipsText, "║ Press P to close                              ║")
+	ipsText = append(ipsText, "╚═══════════════════════════════════════════════╝")
+
+	startY := (tui.height - len(ipsText)) / 2
+	startX := (tui.width - len(ipsText[0])) / 2
+
+	panelStyle := tcell.StyleDefault.Foreground(currentTheme.Attack).Background(currentTheme.Background).Bold(true)
+
+	for i, line := range ipsText {
+		y := startY + i
+		if y >= 0 && y < tui.height {
+			tui.drawText(startX, y, line, panelStyle)
+		}
+	}
+}
+
 func (tui *TUI) renderHelpPanel() {
 	if !tui.state.showHelp {
 		return
@@ -2055,10 +2605,15 @@ func (tui *TUI) renderHelpPanel() {
 		"║ +/-     - Zoom in/out                 ║",
 		"║ Arrows  - Nudge view angle            ║",
 		"║ T       - Cycle themes                ║",
-		"║ C       - Toggle coastlines/grid      ║",
-		"║ G       - Toggle great-circle arcs    ║",
+		"║ G       - Toggle attack arcs          ║",
 		"║ L       - Toggle lighting             ║",
 		"║ R       - Toggle Matrix rain          ║",
+		"║ I       - Toggle attack info panel    ║",
+		"║ S       - Toggle stats panel          ║",
+		"║ P       - Toggle top IPs panel        ║",
+		"║ , / .   - Scroll dashboard left/right ║",
+		"║ H       - Reset dashboard scroll      ║",
+		"║ C       - Toggle command guide        ║",
 		"║ ?       - Toggle this help panel      ║",
 		"║ Q/X/Esc - Exit                        ║",
 		"╚═══════════════════════════════════════╝",
@@ -2077,10 +2632,49 @@ func (tui *TUI) renderHelpPanel() {
 	}
 }
 
+func (tui *TUI) renderCommandGuide() {
+	y := tui.height - 1
+	if y < 0 || y >= tui.height {
+		return
+	}
+
+	// Always clear the bottom line first
+	blankStyle := tcell.StyleDefault.Background(currentTheme.Background)
+	for x := 0; x < tui.width; x++ {
+		tui.screen.SetContent(x, y, ' ', nil, blankStyle)
+	}
+
+	if !tui.state.showCommands {
+		return
+	}
+
+	// Command guide at bottom of screen
+	guideLines := []string{
+		"T:Theme L:Light G:Arcs R:Rain I:Info S:Stats P:TopIPs ,:Left .:Right H:Home Space:Pause []:Speed +-:Zoom Arrows:Nudge C:Guide ?:Help Q:Quit",
+	}
+
+	guideStyle := tcell.StyleDefault.Foreground(currentTheme.Dashboard).Background(currentTheme.Background).Bold(true)
+
+	// Center the guide text
+	text := guideLines[0]
+	if len(text) > tui.width {
+		text = text[:tui.width]
+	}
+	startX := (tui.width - len(text)) / 2
+	if startX < 0 {
+		startX = 0
+	}
+	tui.drawText(startX, y, text, guideStyle)
+}
+
 func (tui *TUI) Render(rotation float64, protocolGlyphs bool) {
 	tui.renderGlobe(rotation, protocolGlyphs)
 	tui.renderDashboard()
 	tui.renderStats()
+	tui.renderInfoPanel()
+	tui.renderStatsPanel()
+	tui.renderTopIPsPanel()
+	tui.renderCommandGuide()
 	tui.renderHelpPanel()
 	tui.screen.Show()
 
@@ -2139,7 +2733,7 @@ func (tui *TUI) pollEvents(aspectRatio float64) chan bool {
 						tui.MarkGlobeChanged()
 					case 't', 'T':
 						// Cycle themes
-						themeNames := []string{"default", "matrix", "amber", "solarized", "nord", "dracula", "mono"}
+						themeNames := []string{"default", "matrix", "amber", "solarized", "nord", "dracula", "mono", "rainbow", "skittles"}
 						tui.state.mutex.Lock()
 						tui.state.currentTheme = (tui.state.currentTheme + 1) % len(themeNames)
 						currentTheme = themes[themeNames[tui.state.currentTheme]]
@@ -2149,18 +2743,29 @@ func (tui *TUI) pollEvents(aspectRatio float64) chan bool {
 						tui.MarkStatsChanged()
 					case 'c', 'C':
 						tui.state.mutex.Lock()
-						tui.state.showGrid = !tui.state.showGrid
+						tui.state.showCommands = !tui.state.showCommands
 						tui.state.mutex.Unlock()
+						tui.MarkGlobeChanged()
 					case 'g', 'G':
 						tui.state.mutex.Lock()
 						tui.state.showArcs = !tui.state.showArcs
 						tui.state.mutex.Unlock()
 						if globalArcManager != nil {
+							globalArcManager.mutex.Lock()
 							if tui.state.showArcs {
-								globalArcManager.arcStyle = "curved"
+								// Restore saved style or default to curved
+								if tui.state.savedArcStyle == "" || tui.state.savedArcStyle == "off" {
+									globalArcManager.arcStyle = "curved"
+									tui.state.savedArcStyle = "curved"
+								} else {
+									globalArcManager.arcStyle = tui.state.savedArcStyle
+								}
 							} else {
+								// Save current style and turn off
+								tui.state.savedArcStyle = globalArcManager.arcStyle
 								globalArcManager.arcStyle = "off"
 							}
+							globalArcManager.mutex.Unlock()
 						}
 					case 'l', 'L':
 						tui.globe.Lighting = !tui.globe.Lighting
@@ -2175,6 +2780,45 @@ func (tui *TUI) pollEvents(aspectRatio float64) chan bool {
 						tui.state.showHelp = !tui.state.showHelp
 						tui.state.mutex.Unlock()
 						tui.MarkGlobeChanged()
+					case 'i', 'I':
+						tui.state.mutex.Lock()
+						tui.state.showInfo = !tui.state.showInfo
+						tui.state.mutex.Unlock()
+						tui.MarkGlobeChanged()
+					case 's', 'S':
+						tui.state.mutex.Lock()
+						tui.state.showStats = !tui.state.showStats
+						tui.state.mutex.Unlock()
+						tui.MarkGlobeChanged()
+						tui.MarkDashboardChanged()
+						tui.MarkStatsChanged()
+					case 'p', 'P':
+						tui.state.mutex.Lock()
+						tui.state.showTopIPs = !tui.state.showTopIPs
+						tui.state.mutex.Unlock()
+						tui.MarkGlobeChanged()
+						tui.MarkDashboardChanged()
+					case ',', '<':
+						// Scroll dashboard left
+						tui.state.mutex.Lock()
+						tui.state.dashboardScroll -= 5
+						if tui.state.dashboardScroll < 0 {
+							tui.state.dashboardScroll = 0
+						}
+						tui.state.mutex.Unlock()
+						tui.MarkDashboardChanged()
+					case '.', '>':
+						// Scroll dashboard right
+						tui.state.mutex.Lock()
+						tui.state.dashboardScroll += 5
+						tui.state.mutex.Unlock()
+						tui.MarkDashboardChanged()
+					case 'h', 'H':
+						// Reset scroll to home position
+						tui.state.mutex.Lock()
+						tui.state.dashboardScroll = 0
+						tui.state.mutex.Unlock()
+						tui.MarkDashboardChanged()
 					}
 				case tcell.KeyUp:
 					tui.globe.NudgeY -= 2

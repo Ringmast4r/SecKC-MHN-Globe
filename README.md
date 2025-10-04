@@ -65,7 +65,9 @@ The display shows **whichever data is available first** - preferring ASN/Org, fa
 
 ### Visual Enhancements
 - **Multiple Character Sets**: Choose between ASCII, Unicode blocks, or high-res Braille rendering (2-4x higher resolution)
-- **7 Color Themes**: default, matrix, amber, solarized, nord, dracula, mono - switch live with `T` key
+- **9 Color Themes**: default, matrix, amber, solarized, nord, dracula, mono, rainbow, skittles - switch live with `T` key
+- **Rainbow Theme**: Solid diagonal rainbow stripes (Red → Orange → Yellow → Green → Blue → Indigo → Violet)
+- **Skittles Theme**: Randomized rainbow-colored globe with each character displaying vibrant colors like scattered candy
 - **Globe Lighting & Shading**: Lambertian diffuse lighting with configurable sun position and auto-follow mode
 - **Attack Arc Trails**: Bézier curve attack paths with fade effects and motion blur
 - **Matrix Rain Effect**: Falling code columns with configurable density
@@ -75,11 +77,25 @@ The display shows **whichever data is available first** - preferring ASN/Org, fa
 ### Real-time Data & Intelligence
 - **Live Attack Visualization**: Attacks marked on globe with protocol-specific indicators
 - **HPFeeds Integration**: Connect to honeypot data feeds for real-time threat intelligence
-- **IP/Username/Password Display**: Shows credential attempts from detected logins
+- **Enhanced Dashboard**: Single-line compact display with full attack details:
+  - IP address (15 chars)
+  - Country code [CC] (2-letter)
+  - City name (12 chars)
+  - Protocol (SSH, HTTP, etc)
+  - Credentials (username:password)
+  - Timestamp (HH:MM format)
+  - ASN/Organization or rDNS (full length, uses all remaining space)
+- **Dynamic Dashboard Width**: Auto-expands to use all available terminal space (minimum 50 chars)
+- **Horizontal Scrolling**: Press `,` and `.` to scroll dashboard left/right to see full text
+- **Scroll Indicators**: `◀` shows more content to the left, `▶` shows more content to the right
+- **Full Text Display**: All organization and rDNS names displayed in full - just scroll to see them!
 - **Geographic Mapping**: IP geolocation with MaxMind GeoLite2 database (LRU cached)
-- **Country Code Display**: Shows 2-letter country code next to each attack IP (live data only)
+- **Country Code & City Display**: Shows 2-letter country code and city name for each attack IP
 - **ASN & Organization**: Displays Autonomous System Number and ISP/organization info (live data only)
 - **Reverse DNS Lookup**: Shows rDNS hostnames for attacking IPs (live data only)
+- **Detailed Info Panel**: Press `I` to view full details of most recent attack (IP, City, Country, ASN, Org, rDNS, Protocol, Credentials, Timestamp)
+- **Top Attackers Stats Panel**: Press `S` to view top 5 countries and top 5 ASNs
+- **Top IP Addresses Panel**: Press `P` to view top 10 attacking IP addresses with attack counts and organization info
 - **Hourly Attack Stats**: ASCII bar chart + sparklines showing 24-hour attack volume
 - **Demo Storm Mode**: Simulated attack traffic generator for presentations (optimized, no ASN/rDNS lookups)
 
@@ -87,8 +103,11 @@ The display shows **whichever data is available first** - preferring ASN/Org, fa
 - **Navigation**: Arrow keys to nudge view, `+`/`-` to zoom (0.5x-3.0x)
 - **Playback**: `Space` to pause, `[`/`]` to adjust spin speed (0.1x-5.0x)
 - **Visual Toggles**: `T` cycle themes, `L` toggle lighting, `G` toggle arcs, `R` toggle rain
-- **Help Overlay**: Press `?` for keyboard shortcuts
-- **Dynamic Resize**: Seamlessly adapts to terminal window resizing without breaking
+- **Info Panels**: `I` detailed attack info, `S` top attackers stats, `P` top IP addresses
+- **Dashboard Scrolling**: `,` scroll left, `.` scroll right, `H` reset to home
+- **Command Guide**: Press `C` for onscreen quick reference at bottom of screen
+- **Help Overlay**: Press `?` for full keyboard shortcuts
+- **Dynamic Resize**: Seamlessly adapts to terminal window resizing (globe gets 60% width, dashboard 40%)
 
 ### Configuration & Recording
 - **TOML Config Files**: Load settings from config file with CLI override support
@@ -135,10 +154,21 @@ go run SecKC-MHN-Globe.go
 ### 🎮 Interactive Keyboard Controls (While Running)
 
 **Change Visuals in Real-Time:**
-- `T` - Cycle themes (default → matrix → amber → solarized → nord → dracula → mono)
+- `T` - Cycle themes (default → matrix → amber → solarized → nord → dracula → mono → rainbow → skittles)
 - `L` - Toggle lighting/shading on globe
 - `G` - Toggle attack arc trails
 - `R` - Toggle Matrix rain effect
+
+**View Attack Information:**
+- `I` - Show/hide detailed attack info panel (shows most recent attack details)
+- `S` - Show/hide top attackers statistics panel (top 5 countries and ASNs)
+- `P` - Show/hide top IP addresses panel (top 10 attacking IPs with organization info)
+
+**Dashboard Scrolling:**
+- `,` - Scroll dashboard left (shows earlier part of long text)
+- `.` - Scroll dashboard right (shows later part of long text)
+- `H` - Reset scroll to home position
+- **Scrolling works!** All text is fully displayed - just scroll to see it
 
 **Navigation & Playback:**
 - `Space` - Pause/resume globe rotation
@@ -146,8 +176,11 @@ go run SecKC-MHN-Globe.go
 - `+` / `-` - Zoom in/out
 - Arrow keys - Nudge globe view angle
 
-**Help & Exit:**
-- `?` - Show/hide help overlay with all controls
+**Help & Guides:**
+- `C` - Show/hide command guide at bottom of screen (quick reference)
+- `?` - Show/hide full help overlay with all controls
+
+**Exit:**
 - `Q`, `X`, `Esc`, or `Ctrl+C` - Quit application
 
 ## 🎨 Command Line Visual Options
@@ -168,6 +201,8 @@ go run SecKC-MHN-Globe.go
 --theme nord          # Cool Scandinavian palette
 --theme dracula       # Dark with neon accents
 --theme mono          # High-contrast white
+--theme rainbow       # Solid diagonal rainbow stripes
+--theme skittles      # Randomized rainbow colors per character
 ```
 
 **Visual Effects:**
@@ -276,9 +311,29 @@ This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICE
 
 ### Common Issues
 
-3. **Terminal display issues**: Ensure terminal supports color and proper size
-4. **Performance problems**: Enable debug logging with `-d` option
-5. **Globe landmass seems "blocky"**: Reduce terminal size to below 190x70
+1. **Text cut off on the right side**: Use the **horizontal scrolling feature**! Press `.` to scroll right and see the rest of the text. Press `,` to scroll back left. Press `H` to reset scroll. All organization names and rDNS info are fully displayed - just scroll to see them!
+
+2. **Command guide showing at bottom**: Press `C` to toggle the onscreen command guide on/off.
+
+3. **Panels won't close**: Make sure to press the same key to toggle panels off:
+   - `I` - Toggles attack info panel
+   - `S` - Toggles top attackers stats panel
+   - `P` - Toggles top IPs panel
+   - `C` - Toggles command guide
+   - `?` - Toggles help panel
+
+4. **Rainbow/Skittles theme not showing**: Press `T` key to cycle through all 9 themes:
+   - Rainbow (8th theme) = solid diagonal rainbow stripes
+   - Skittles (9th theme) = randomized rainbow colors
+   - Or start directly with `--theme rainbow` or `--theme skittles`
+
+5. **Terminal display issues**: Ensure terminal supports color and proper size (minimum 80x24, recommended 200x50+)
+
+6. **Performance problems**: Enable debug logging with `-d` option
+
+7. **Globe landmass seems "blocky"**: Reduce terminal size to below 190x70 or try different character sets with `--charset braille`
+
+8. **Window resize breaks display**: The program handles resizing dynamically. The globe uses 60% of window width, dashboard uses 40%. Expand the window to see more text without scrolling!
 
 ### Debug Mode
 
