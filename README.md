@@ -2,6 +2,8 @@
 
 Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash), I wanted something similar to run in text mode. Minimum recommended terminal size is 80x24. UI elements will scale nicely to higher terminal sizes and on-the-fly window size changes are handled gracefully above the minimum recommended size.
 
+**Enhanced version hacked by ringmast4r**
+
 ## TUI Earth Visualization with Honeypot Monitoring
 ![SecKC-MHN-Globe Animation](animation.gif)
 
@@ -61,19 +63,31 @@ go build SecKC-MHN-Globe.go
 
 ## Quick Start
 
-### Basic Usage (with demo mode)
+### Launch Commands
+
+After navigating to the folder (`cd SecKC-MHN-Globe-main`):
+
 ```bash
-# Run with simulated attack traffic
-./SecKC-MHN-Globe-Enhanced --demo-storm
+# Simple demo with fake attack traffic
+go run SecKC-MHN-Globe-Enhanced.go --demo-storm
 
-# Matrix theme with all effects
-./SecKC-MHN-Globe-Enhanced --theme matrix --charset braille --rain --arcs curved --lighting --demo-storm
+# Matrix theme with all visual effects
+go run SecKC-MHN-Globe-Enhanced.go --theme matrix --charset braille --rain --arcs curved --lighting --demo-storm
 
-# Minimal setup for live data
-./SecKC-MHN-Globe-Enhanced
+# Live monitoring (connects to real honeypot data)
+go run SecKC-MHN-Globe-Enhanced.go
+
+# Original simple version
+go run SecKC-MHN-Globe.go
 ```
 
-### Interactive Controls
+### 🎮 Interactive Keyboard Controls (While Running)
+
+**Change Visuals in Real-Time:**
+- `T` - Cycle themes (default → matrix → amber → solarized → nord → dracula → mono)
+- `L` - Toggle lighting/shading on globe
+- `G` - Toggle attack arc trails
+- `R` - Toggle Matrix rain effect
 
 **Navigation & Playback:**
 - `Space` - Pause/resume globe rotation
@@ -81,67 +95,86 @@ go build SecKC-MHN-Globe.go
 - `+` / `-` - Zoom in/out
 - Arrow keys - Nudge globe view angle
 
-**Visual Toggles:**
-- `T` - Cycle through 7 color themes
-- `L` - Toggle globe lighting/shading
-- `G` - Toggle attack arc trails
-- `R` - Toggle Matrix rain effect
-- `?` - Show/hide help overlay
-
-**Exit:**
+**Help & Exit:**
+- `?` - Show/hide help overlay with all controls
 - `Q`, `X`, `Esc`, or `Ctrl+C` - Quit application
 
-## Command Line Options
+## 🎨 Command Line Visual Options
 
-### Visual Options
-- `--charset <type>` - Character set: ascii|blocks|braille (default: ascii)
-- `--theme <name>` - Theme: default|matrix|amber|solarized|nord|dracula|mono
-- `--arcs <style>` - Attack arcs: curved|straight|off (default: off)
-- `--trail-ms <n>` - Arc trail duration in milliseconds (default: 1200)
-- `--lighting` - Enable globe lighting/shading
-- `--light-lon <deg>` - Light source longitude (default: 0.0)
-- `--light-lat <deg>` - Light source latitude (default: 0.0)
-- `--light-follow` - Light rotates opposite to globe
-- `--rain` - Enable Matrix rain effect
-- `--rain-density <n>` - Rain density 0-10 (default: 5)
-- `--crt` - Enable CRT scanline effect
-- `--glow <n>` - Phosphor glow level 0-3 (default: 0)
-- `--protocol-glyphs` - Show protocol-specific icons on attacks
+**Character Sets (Resolution):**
+```bash
+--charset ascii       # Classic ASCII characters (default)
+--charset blocks      # Unicode block characters (█▓▒░)
+--charset braille     # High-resolution Braille (2-4x sharper) ⣿
+```
 
-### Display Options
+**Themes:**
+```bash
+--theme default       # Classic green globe
+--theme matrix        # Green Matrix hacker aesthetic
+--theme amber         # Retro CRT orange
+--theme solarized     # Low-contrast blue/teal
+--theme nord          # Cool Scandinavian palette
+--theme dracula       # Dark with neon accents
+--theme mono          # High-contrast white
+```
+
+**Visual Effects:**
+```bash
+--arcs curved         # Bézier curve attack trails
+--arcs straight       # Direct attack paths
+--lighting            # Enable 3D globe shading
+--light-follow        # Light rotates opposite to globe
+--rain                # Matrix rain effect
+--rain-density 5      # Rain density (0-10)
+--protocol-glyphs     # Show attack type icons (# = SSH, ~ = Telnet, @ = SMTP, : = HTTP, % = FTP)
+--crt                 # Retro CRT scanline effect
+--glow 2              # Phosphor glow level (0-3)
+```
+
+**Demo Mode:**
+```bash
+--demo-storm          # Generate fake attack traffic (perfect for demos!)
+--demo-rate 50        # Attacks per second (default: 10)
+```
+
+## ⚙️ Other Command Line Options
+
+**Display Settings:**
 - `-s <seconds>` - Globe rotation period (10-300, default: 30)
 - `-r <milliseconds>` - Refresh rate (50-1000, default: 100)
 - `-a <ratio>` - Character aspect ratio (1.0-4.0, default: 2.0)
 
-### Data & API Options
+**API Settings:**
 - `-u <url>` - SecKC API base URL (default: https://mhn.h-i-r.net/seckcapi)
 - `-e <count>` - Max events per API call (1-500, default: 50)
 - `-p <duration>` - API polling interval (1s-300s, default: 2s)
-- `--demo-storm` - Enable demo traffic generator
-- `--demo-rate <n>` - Demo attacks per second (default: 10)
 
-### Configuration & Recording
+**Configuration & Recording:**
 - `--config <file>` - Load settings from TOML config file
 - `--record <file>` - Record session to asciinema file
 - `-d <filename>` - Enable debug logging
 
-### Examples
+## 💡 Example Commands
 
 ```bash
 # High-resolution Braille rendering with demo traffic
-./SecKC-MHN-Globe-Enhanced --charset braille --demo-storm
+go run SecKC-MHN-Globe-Enhanced.go --charset braille --demo-storm
 
 # Full visual effects showcase
-./SecKC-MHN-Globe-Enhanced --theme matrix --charset braille --rain --arcs curved --lighting --light-follow --protocol-glyphs --demo-storm --demo-rate 50
+go run SecKC-MHN-Globe-Enhanced.go --theme matrix --charset braille --rain --arcs curved --lighting --light-follow --protocol-glyphs --demo-storm --demo-rate 50
 
 # Conference presentation mode with recording
-./SecKC-MHN-Globe-Enhanced --theme dracula --arcs curved --demo-storm --demo-rate 100 --record conference-demo.cast
+go run SecKC-MHN-Globe-Enhanced.go --theme dracula --arcs curved --demo-storm --demo-rate 100 --record conference-demo.cast
 
-# Live monitoring with custom theme
-./SecKC-MHN-Globe-Enhanced --theme nord --arcs curved --lighting
+# Live monitoring with Nord theme
+go run SecKC-MHN-Globe-Enhanced.go --theme nord --arcs curved --lighting
 
-# Original version (simple ASCII globe)
-./SecKC-MHN-Globe
+# Retro CRT mode
+go run SecKC-MHN-Globe-Enhanced.go --theme amber --charset blocks --crt --glow 2
+
+# Original simple version
+go run SecKC-MHN-Globe.go
 ```
 
 ## TOML Configuration File
