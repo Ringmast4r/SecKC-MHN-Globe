@@ -1,6 +1,6 @@
 # SecKC-MHN-Globe
 
-Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash), I wanted something similar to run in text mode. Minimum recommended terminal size is 80x24. UI elements will scale nicely to higher terminal sizes and on-the-fly window size changes are handled gracefully above the minimum recommended size.
+Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash).
 
 **Enhanced version hacked by ringmast4r**
 
