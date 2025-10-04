@@ -1,6 +1,6 @@
 # SecKC-MHN-Globe
 
-Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash).
+Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash), I wanted something similar to run in text mode. Minimum recommended terminal size is 80x24. UI elements will scale nicely to higher terminal sizes and on-the-fly window size changes are handled gracefully above the minimum recommended size.
 
 **Enhanced version hacked by ringmast4r**
 
@@ -13,6 +13,54 @@ Terminal-based application displaying a rotating 3D ASCII globe with a live dash
 ![Go Version](https://img.shields.io/badge/Go-1.24.5-blue)
 ![License](https://img.shields.io/badge/License-BSD%202--Clause-blue)
 
+## 📡 How This Works
+
+**This tool doesn't monitor YOUR computer.** It connects to the **SecKC MHN (Modern Honey Network)** - a public honeypot project that collects attack data from honeypots (fake vulnerable servers) around the world.
+
+**Here's how it works:**
+
+1. **SecKC runs honeypots** - Fake servers that pretend to be vulnerable SSH, Telnet, HTTP servers
+2. **Attackers find and attack them** - Bots/hackers try to break in with usernames/passwords
+3. **The honeypots log everything** - IPs, credentials, protocols
+4. **SecKC publishes this data** - Via their public API at `https://mhn.h-i-r.net/seckcapi`
+5. **Your program displays it** - You're visualizing attacks on THEIR honeypots, not yours
+
+**You're just a viewer of attack data** - you're not being attacked. The globe shows where attacks are coming from globally against the SecKC honeypot network. You're monitoring the internet's background noise of constant attacks happening 24/7.
+
+## 📊 Understanding the Data
+
+Each attack entry shows two lines of information:
+
+**Example with ASN/Org data:**
+```
+185.220.101.45 [DE] root:admin123
+AS24940 Hetzner Online GmbH
+```
+
+**What the data means:**
+
+- **ASN (Autonomous System Number)** - A unique number identifying a network (e.g., AS15169)
+- **Org (Organization)** - The company/ISP that owns that network (e.g., "Google LLC", "Hetzner Online GmbH")
+  - Tells you **who owns the IP address block**
+
+- **rDNS (Reverse DNS)** - The hostname that the IP address points back to
+  - Like a domain name for that specific IP
+  - Often shows the actual server name or ISP's naming scheme
+  - Example: `crawl-66-249-66-1.googlebot.com` or `static.22.145.93.142.clients.your-server.de`
+
+**The difference:**
+```
+66.249.66.1 [US] admin:password
+AS15169 Google LLC          ← Shows who owns the network
+```
+vs
+```
+66.249.66.1 [US] admin:password
+crawl-66-249-66-1.googlebot.com  ← Shows the specific server hostname
+```
+
+The display shows **whichever data is available first** - preferring ASN/Org, falling back to rDNS if ASN isn't available. Some IPs may show "..." if lookups timeout or the IP has no reverse DNS record.
+
 ## Features
 
 ### Visual Enhancements
@@ -24,20 +72,23 @@ Terminal-based application displaying a rotating 3D ASCII globe with a live dash
 - **CRT/Scanline Effects**: Retro phosphor glow and scanline dimming
 - **Protocol Glyphs**: Visual icons showing attack types (# SSH, ~ Telnet, @ SMTP, : HTTP, % FTP)
 
-### Real-time Data
+### Real-time Data & Intelligence
 - **Live Attack Visualization**: Attacks marked on globe with protocol-specific indicators
 - **HPFeeds Integration**: Connect to honeypot data feeds for real-time threat intelligence
 - **IP/Username/Password Display**: Shows credential attempts from detected logins
 - **Geographic Mapping**: IP geolocation with MaxMind GeoLite2 database (LRU cached)
+- **Country Code Display**: Shows 2-letter country code next to each attack IP (live data only)
+- **ASN & Organization**: Displays Autonomous System Number and ISP/organization info (live data only)
+- **Reverse DNS Lookup**: Shows rDNS hostnames for attacking IPs (live data only)
 - **Hourly Attack Stats**: ASCII bar chart + sparklines showing 24-hour attack volume
-- **Demo Storm Mode**: Simulated attack traffic generator for presentations
+- **Demo Storm Mode**: Simulated attack traffic generator for presentations (optimized, no ASN/rDNS lookups)
 
 ### Interactive Controls
 - **Navigation**: Arrow keys to nudge view, `+`/`-` to zoom (0.5x-3.0x)
 - **Playback**: `Space` to pause, `[`/`]` to adjust spin speed (0.1x-5.0x)
 - **Visual Toggles**: `T` cycle themes, `L` toggle lighting, `G` toggle arcs, `R` toggle rain
 - **Help Overlay**: Press `?` for keyboard shortcuts
-- **Responsive Design**: Adapts to terminal size with optimized layout
+- **Dynamic Resize**: Seamlessly adapts to terminal window resizing without breaking
 
 ### Configuration & Recording
 - **TOML Config Files**: Load settings from config file with CLI override support
