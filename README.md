@@ -1,6 +1,6 @@
 # SecKC-MHN-Globe
 
-Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash).
+Inspired by [The SecKC MHN Cyber Attack Map](https://mhn.h-i-r.net/dash), which inspired [n0xa's SecKC-MHN-Globe](https://github.com/n0xa/SecKC-MHN-Globe), which inspired me to build this enhanced version.
 
 **Enhanced version hacked by ringmast4r**
 
